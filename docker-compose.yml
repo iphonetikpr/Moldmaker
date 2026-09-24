@@ -1,0 +1,12 @@
+# Moldmaker on the NAS. Host port 8080 → container 80.
+version: "3.3"
+
+services:
+  moldmaker:
+    build: .
+    image: moldmaker:local
+    container_name: moldmaker
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+    mem_limit: 256m

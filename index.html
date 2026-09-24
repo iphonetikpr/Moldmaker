@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Moldmaker</title>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("moldmaker.theme") === "light") {
+            document.documentElement.setAttribute("data-theme", "light");
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <style>
+      html,
+      body {
+        background: #0b0f14;
+        color: #e8eef5;
+      }
+      html[data-theme="light"],
+      html[data-theme="light"] body {
+        background: #f3f5f8;
+        color: #121820;
+      }
+    </style>
+    <meta
+      name="description"
+      content="Moldmaker: importa STL/OBJ, elige Adapted Box, Tray o 2-Part Silicone, previsualiza y exporta STL listos para imprimir con el volumen de silicona."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='6' width='26' height='20' rx='3' fill='%23141A22' stroke='%230F9F6E' stroke-width='2'/%3E%3Cpath d='M8 16h16M16 10v12' stroke='%230F9F6E' stroke-width='1.6'/%3E%3Ccircle cx='16' cy='16' r='2.2' fill='%230F9F6E'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
