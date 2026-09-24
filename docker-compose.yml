@@ -1,4 +1,4 @@
-# Moldmaker on the NAS. Host port 8080 → container 80.
+# Moldmaker on the NAS. Host port 8081 → container 80 (8080 is Jiggmaker).
 version: "3.3"
 
 services:
@@ -7,6 +7,6 @@ services:
     image: moldmaker:local
     container_name: moldmaker
     ports:
-      - "8080:80"
+      - "8081:80"
     restart: unless-stopped
     mem_limit: 256m

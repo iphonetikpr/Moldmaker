@@ -2,7 +2,7 @@
 
 App web para generar **cajas de molde de silicona** a partir de un maestro STL u OBJ. Eliges el sistema, ajustas los parámetros CAD y descargas STL listos para imprimir, con una estimación del volumen de silicona.
 
-**Mismo patrón que Jiggmaker:** SPA Vite/TypeScript en el navegador. El uso diario es **Docker Compose en un Synology** (puerto **8080**). **GitHub Pages** es la demo estática. No hay backend: el archivo no sale del navegador.
+**Mismo patrón que Jiggmaker:** SPA Vite/TypeScript en el navegador. El uso diario es **Docker Compose en un Synology** (puerto **8081**, para no chocar con Jiggmaker en el 8080). **GitHub Pages** es la demo estática. No hay backend: el archivo no sale del navegador.
 
 ## Qué hace
 
@@ -71,13 +71,13 @@ Si el NAS tiene Compose v2:
 sudo docker compose up -d --build
 ```
 
-**GUI:** Docker / Container Manager → Proyecto → creado desde `docker-compose.yml` → carpeta de este archivo → puerto **8080**.
+**GUI:** Docker / Container Manager → Proyecto → creado desde `docker-compose.yml` → carpeta de este archivo → puerto **8081**.
 
 ### 3. Abre la app
 
-En la LAN: `http://<ip-del-nas>:8080`
+En la LAN: `http://<ip-del-nas>:8081`
 
-Si el 8080 está ocupado, cambia el puerto del host en `docker-compose.yml` (`"9080:80"`).
+Si el 8081 está ocupado, cambia el puerto del host en `docker-compose.yml` (`"9081:80"`).
 
 ### 4. Actualizar
 
