@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULTS } from "../constants";
 import type { MoldParams, Vec3 } from "../types";
-import { frustumVolume, planMold } from "./layout";
-import { isConcave, pointInPoly, polyArea, loopBounds } from "./outline";
+import { frustumVolume, planMold, profileLabel } from "./layout";
+import { isAxisAlignedRect, isConcave, offsetClean, pointInPoly, polyArea, loopBounds, type Loop } from "./outline";
 import { defaultParams, sanitizeParams } from "./params";
 import { planSplits } from "./split";
 import { safeName } from "./export";
@@ -92,6 +92,20 @@ describe("layout", () => {
     expect(pointInPoly([6, 6], carve.bottom)).toBe(false);
     expect(pointInPoly([6, 6], shell.bottom)).toBe(false);
     expect(Math.abs(polyArea(shell.bottom))).toBeLessThan(shellBox.w * shellBox.h * 0.85);
+    expect(plan.profileMode).toBe("silhouette");
+  });
+
+  it("falls back to the bounding box when only the naive offset is available", () => {
+    const blob = organicLoop();
+    expect(offsetClean(blob, 3.5)).toBeNull();
+    const plan = planMold("tray", [50, 49, 14], 1000, params({ draftDeg: 0, clampEnabled: false }), blob);
+    expect(plan.profileMode).toBe("bbox");
+    expect(profileLabel(plan.profileMode)).toBe("Caja envolvente");
+    expect(plan.warnings.some((w) => w.includes("caja envolvente"))).toBe(true);
+    const shell = plan.solids[0].unions[0];
+    expect(shell.kind).toBe("poly");
+    if (shell.kind !== "poly") return;
+    expect(isAxisAlignedRect(shell.bottom)).toBe(true);
   });
 
   it("builds a single tray without a second half", () => {
@@ -115,6 +129,17 @@ describe("layout", () => {
     expect(pins[0].kind === "cyl" && pins[0].height).toBeCloseTo(5.3);
   });
 });
+
+function organicLoop(): Loop {
+  const pts: Loop = [];
+  const n = 64;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    const r = 18 + 7 * Math.sin(5 * a) + 2.5 * Math.sin(13 * a);
+    pts.push([Math.cos(a) * r, Math.sin(a) * r]);
+  }
+  return pts;
+}
 
 describe("split plan", () => {
   it("fits 250 mm beds and leaves a single piece when it already fits", () => {

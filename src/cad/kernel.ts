@@ -4,7 +4,7 @@ import { CYL_SEGMENTS } from "../constants";
 import type { MeshData, Vec3 } from "../types";
 import { bboxOf } from "./mesh";
 import type { Feat } from "./layout";
-import { loftMesh, mergeCollinear, polyArea, rectLoop, stripClose, type Loop } from "./outline";
+import { ensureCCW, loftMesh, loftVolume, mergeCollinear, polyArea, rectLoop, stripClose, type Loop } from "./outline";
 
 let pending: Promise<Kernel> | null = null;
 
@@ -95,8 +95,9 @@ export class Kernel {
   /**
    * Exact XY silhouette: union of every projected triangle.
    * The largest positive contour is the outside of the part.
+   * `exact` is false when that union is empty and the loop is only the bounding rectangle.
    */
-  projectOutline(mesh: MeshData): Loop {
+  projectOutline(mesh: MeshData): { loop: Loop; exact: boolean } {
     const p = mesh.positions;
     const idx = mesh.indices;
     const contours: Loop[] = [];
@@ -116,7 +117,7 @@ export class Kernel {
     const fallback = rectLoop(bb.max[0] - bb.min[0], bb.max[1] - bb.min[1]).map(
       ([x, y]) => [x + cx, y + cy] as [number, number],
     );
-    if (!contours.length) return fallback;
+    if (!contours.length) return { loop: fallback, exact: false };
     const cs = new this.wasm.CrossSection(contours, "Positive");
     let simple: typeof cs | null = null;
     try {
@@ -132,11 +133,52 @@ export class Kernel {
           best = loop;
         }
       }
-      return best ?? fallback;
+      return best ? { loop: best, exact: true } : { loop: fallback, exact: false };
     } finally {
       if (simple && simple !== cs) simple.delete();
       cs.delete();
     }
+  }
+
+  /**
+   * Clipper offset. Resolves the self-intersections that a 1:1 miter offset
+   * leaves on a concave silhouette, so the mold does not have to fall back
+   * to the bounding rectangle.
+   */
+  offsetOutline(loop: Loop, delta: number): Loop | null {
+    if (loop.length < 3) return null;
+    const src = ensureCCW(loop);
+    if (src.length < 3) return null;
+    if (Math.abs(delta) < 1e-9) return mergeCollinear(src);
+    const once = (join: "Miter" | "Round"): Loop | null => {
+      const cs = new this.wasm.CrossSection([src], "Positive");
+      let grown: typeof cs | null = null;
+      let simple: typeof cs | null = null;
+      try {
+        grown = join === "Round" ? cs.offset(delta, "Round", 2, 8) : cs.offset(delta, "Miter", 2);
+        if (grown.isEmpty()) return null;
+        simple = grown.simplify(0.05);
+        const polys = simple.toPolygons();
+        let best: Loop | null = null;
+        let bestA = 0;
+        for (const poly of polys) {
+          const ring = mergeCollinear(stripClose(poly.map((v) => [v[0], v[1]] as [number, number])), 0.05);
+          const area = polyArea(ring);
+          if (area > bestA && ring.length >= 3) {
+            bestA = area;
+            best = ring;
+          }
+        }
+        return best && bestA > 1e-3 ? best : null;
+      } catch {
+        return null;
+      } finally {
+        if (simple && simple !== grown) simple.delete();
+        if (grown && grown !== cs) grown.delete();
+        cs.delete();
+      }
+    };
+    return once("Miter") ?? once("Round");
   }
 
   private empty(): Manifold {
@@ -175,30 +217,39 @@ export class Kernel {
 
   private poly(bottom: Loop, top: Loop, z0: number, z1: number, holeBottom?: Loop, holeTop?: Loop): Manifold {
     if (bottom.length < 3 || z1 - z0 <= 1e-6) return this.empty();
-    let solid: Manifold;
-    try {
-      const mesh = loftMesh(bottom, top.length === bottom.length ? top : bottom, z0, z1);
-      solid = this.fromRaw(mesh.positions, mesh.indices);
-      if (solid.isEmpty() || solid.numTri() < 4) throw new Error("loft vacío");
-    } catch {
-      const bb0 = loopHalf(bottom);
-      const bb1 = loopHalf(top.length ? top : bottom);
-      const sx = bb0.hx > 1e-6 ? bb1.hx / bb0.hx : 1;
-      const sy = bb0.hy > 1e-6 ? bb1.hy / bb0.hy : 1;
-      solid = this.extrudeLoop(bottom, z0, z1, sx, sy);
-    }
+    const topLoop = top.length >= 3 ? top : bottom;
+    const solid = this.prism(bottom, topLoop, z0, z1);
     if (holeBottom && holeBottom.length >= 3 && holeTop && holeTop.length >= 3) {
       const pad = 0.05;
-      let hole: Manifold;
-      try {
-        const mesh = loftMesh(holeBottom, holeTop.length === holeBottom.length ? holeTop : holeBottom, z0 - pad, z1 + pad);
-        hole = this.fromRaw(mesh.positions, mesh.indices);
-      } catch {
-        hole = this.extrudeLoop(holeBottom, z0 - pad, z1 + pad);
-      }
-      solid = this.subtract(solid, hole);
+      const hole = this.prism(holeBottom, holeTop.length >= 3 ? holeTop : holeBottom, z0 - pad, z1 + pad);
+      return this.subtract(solid, hole);
     }
     return solid;
+  }
+
+  /** Loft only when corners still correspond. Otherwise scale-extrude so unequal Clipper offsets cannot twist. */
+  private prism(bottom: Loop, top: Loop, z0: number, z1: number): Manifold {
+    if (pairedLoops(bottom, top)) {
+      try {
+        const mesh = loftMesh(bottom, top, z0, z1);
+        const solid = this.fromRaw(mesh.positions, mesh.indices);
+        const expectVol = Math.abs(loftVolume(bottom, top, z1 - z0));
+        if (solid.isEmpty() || solid.numTri() < 4) throw new Error("loft vacío");
+        if (expectVol > 1 && solid.volume() < expectVol * 0.5) throw new Error("loft torcido");
+        return solid;
+      } catch {
+        /* scale about the origin instead */
+      }
+    }
+    return this.scaleExtrude(bottom, top, z0, z1);
+  }
+
+  private scaleExtrude(bottom: Loop, top: Loop, z0: number, z1: number): Manifold {
+    const bb0 = loopHalf(bottom);
+    const bb1 = loopHalf(top.length ? top : bottom);
+    const sx = bb0.hx > 1e-6 ? bb1.hx / bb0.hx : 1;
+    const sy = bb0.hy > 1e-6 ? bb1.hy / bb0.hy : 1;
+    return this.extrudeLoop(bottom, z0, z1, sx, sy);
   }
 
   union(a: Manifold, b: Manifold): Manifold {
@@ -237,6 +288,20 @@ export class Kernel {
     }
     return { positions, indices: new Uint32Array(raw.triVerts) };
   }
+}
+
+function pairedLoops(bottom: Loop, top: Loop): boolean {
+  if (bottom.length !== top.length || bottom.length < 3) return false;
+  const n = bottom.length;
+  for (let i = 0; i < n; i++) {
+    const d = Math.hypot(bottom[i][0] - top[i][0], bottom[i][1] - top[i][1]);
+    for (let j = 0; j < n; j++) {
+      if (j === i) continue;
+      const dj = Math.hypot(bottom[i][0] - top[j][0], bottom[i][1] - top[j][1]);
+      if (dj + 1e-4 < d) return false;
+    }
+  }
+  return true;
 }
 
 function loopHalf(loop: Loop): { hx: number; hy: number } {
