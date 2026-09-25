@@ -7,6 +7,7 @@ import { writeSTL } from "./stl";
 import { partFilename, safeName } from "./export";
 import type { Kernel } from "./kernel";
 import { planMold, type SolidSpec } from "./layout";
+import { rectLoop } from "./outline";
 import { planSplits } from "./split";
 
 export interface GenerateInput {
@@ -28,13 +29,14 @@ export function generateMold(kernel: Kernel, input: GenerateInput): MoldResult {
   const masterVolume = Math.abs(signedVolume(master));
   const warnings = [...repaired.warnings];
 
+  let outline = rectLoop(size[0], size[1]);
   try {
-    kernel.fromMesh(master);
+    outline = kernel.projectOutline(master);
   } catch {
-    warnings.push("La malla no es manifold. El molde usa la caja envolvente de la pieza.");
+    warnings.push("No se pudo leer la silueta. El molde usa la caja envolvente de la pieza.");
   }
 
-  const plan = planMold(input.system, size, masterVolume, params);
+  const plan = planMold(input.system, size, masterVolume, params, outline);
   warnings.push(...plan.warnings);
 
   const base = safeName(input.name);

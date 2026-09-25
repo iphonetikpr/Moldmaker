@@ -1,5 +1,5 @@
 export function safeName(name: string): string {
-  const base = name.replace(/\.(stl|obj)$/i, "");
+  const base = name.replace(/\.(stl|obj|svg)$/i, "");
   const s = base
     .normalize("NFKD")
     .replace(/[^\w.-]+/g, "_")

@@ -5,6 +5,8 @@ import { defaultParams } from "./params";
 import { initKernel } from "./kernel";
 import { generateMold } from "./generate";
 import { sampleMaster } from "./mesh";
+import { loftMesh, polyArea } from "./outline";
+import { parseSVG } from "./svg";
 
 describe("generate", () => {
   it("exports adapted, tray and 2-part STLs from the sample", async () => {
@@ -122,5 +124,68 @@ describe("generate", () => {
     const fatVol = fatPin.parts.reduce((s, p) => s + p.mesh.positions.length, 0);
     expect(fatVol).toBeGreaterThan(thinVol);
     expect(thinPin.parts[0].filename).toMatch(/_s1\.stl$/);
+  });
+
+  it("cuts a non-rectangular cavity from an L silhouette", async () => {
+    const kernel = await initKernel();
+    const foot: Array<[number, number]> = [
+      [-15, -15],
+      [15, -15],
+      [15, -3],
+      [-3, -3],
+      [-3, 15],
+      [-15, 15],
+    ];
+    const mesh = loftMesh(foot, foot, 0, 8);
+    const outline = kernel.projectOutline(mesh);
+    expect(Math.abs(polyArea(outline))).toBeCloseTo(576, 0);
+    expect(Math.abs(polyArea(outline))).toBeLessThan(30 * 30 * 0.8);
+
+    const tray = generateMold(kernel, {
+      mesh,
+      name: "ele",
+      system: "tray",
+      params: { ...defaultParams(), draftDeg: 0, clampEnabled: false },
+      up: "z+",
+      rotDeg: 0,
+    });
+    const mold = kernel.fromMesh(tray.parts[0].mesh);
+    const notch = mold.rayCast([6, 6, 5], [80, 6, 5]);
+    const arm = mold.rayCast([0, -9, 5], [40, -9, 5]);
+    expect(notch).toHaveLength(0);
+    expect(arm.length).toBeGreaterThan(0);
+
+    const probe = (x: number, y: number, z: number) => {
+      const bit = kernel.box([x - 0.3, y - 0.3, z - 0.3], [0.6, 0.6, 0.6]);
+      return kernel.intersect(kernel.fromMesh(tray.parts[0].mesh), bit).volume();
+    };
+    expect(probe(0, -17, 5)).toBeGreaterThan(0.05);
+    expect(probe(0, -9, 5)).toBeLessThan(1e-4);
+    expect(probe(6, 6, 5)).toBeLessThan(1e-4);
+    expect(probe(0, -9, 1)).toBeGreaterThan(0.05);
+  });
+
+  it("molds an uploaded SVG silhouette instead of its bounding square", async () => {
+    const kernel = await initKernel();
+    const svg = `<?xml version="1.0"?>
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="-15 -15 30 30" data-depth="8">
+        <polygon points="-15,-15 15,-15 15,-3 -3,-3 -3,15 -15,15"/>
+      </svg>`;
+    const mesh = parseSVG(svg);
+    expect(bboxSize(bboxOf(mesh))[2]).toBeCloseTo(8, 3);
+    const tray = generateMold(kernel, {
+      mesh,
+      name: "ele.svg",
+      system: "adapted",
+      params: { ...defaultParams(), draftDeg: 0, clampEnabled: false, splitEnabled: false },
+      up: "z+",
+      rotDeg: 0,
+    });
+    expect(tray.parts[0].filename).toBe("ele_adapted_box.stl");
+    const mold = kernel.fromMesh(tray.parts[0].mesh);
+    const outside = mold.rayCast([6, -6, 5], [80, -6, 5]);
+    const inside = mold.rayCast([0, 9, 5], [-40, 9, 5]);
+    expect(outside).toHaveLength(0);
+    expect(inside.length).toBeGreaterThan(0);
   });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULTS } from "../constants";
 import type { MoldParams, Vec3 } from "../types";
 import { frustumVolume, planMold } from "./layout";
+import { isConcave, pointInPoly, polyArea, loopBounds } from "./outline";
 import { defaultParams, sanitizeParams } from "./params";
 import { planSplits } from "./split";
 import { safeName } from "./export";
@@ -65,6 +66,32 @@ describe("layout", () => {
     const h = plan.metrics.innerH;
     const expected = Math.tan((1.5 * Math.PI) / 180) * h;
     expect(plan.metrics.extra).toBeCloseTo(expected, 5);
+  });
+
+  it("follows an L silhouette instead of its bounding box", () => {
+    const L: Array<[number, number]> = [
+      [-15, -15],
+      [15, -15],
+      [15, -3],
+      [-3, -3],
+      [-3, 15],
+      [-15, 15],
+    ];
+    const plan = planMold("tray", [30, 30, 8], 576 * 8, params({ draftDeg: 0, clampEnabled: false }), L);
+    const shell = plan.solids[0].unions[0];
+    const carve = plan.solids[0].carve[0];
+    expect(shell.kind).toBe("poly");
+    expect(carve.kind).toBe("poly");
+    if (shell.kind !== "poly" || carve.kind !== "poly") return;
+    const shellBox = loopBounds(shell.bottom);
+    const carveBox = loopBounds(carve.bottom);
+    expect(Math.abs(polyArea(carve.bottom)) / (carveBox.w * carveBox.h)).toBeLessThan(0.8);
+    expect(isConcave(carve.bottom)).toBe(true);
+    expect(isConcave(shell.bottom)).toBe(true);
+    expect(pointInPoly([0, -9], carve.bottom)).toBe(true);
+    expect(pointInPoly([6, 6], carve.bottom)).toBe(false);
+    expect(pointInPoly([6, 6], shell.bottom)).toBe(false);
+    expect(Math.abs(polyArea(shell.bottom))).toBeLessThan(shellBox.w * shellBox.h * 0.85);
   });
 
   it("builds a single tray without a second half", () => {
