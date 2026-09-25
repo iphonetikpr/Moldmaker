@@ -6,7 +6,7 @@ App web para generar **cajas de molde de silicona** a partir de un maestro STL u
 
 ## Qué hace
 
-1. **Import** — STL o OBJ. Repara la malla (suelda vértices, orienta normales) y la apoya en Z.
+1. **Import** — STL, OBJ o SVG. Repara la malla (suelda vértices, orienta normales) y la apoya en Z. Un SVG (milímetros) se extruye; `data-depth` fija la altura y, si falta, usa el espesor de pared (3 mm).
 2. **Sistema** — Adapted Box, Tray o 2-Part Silicone.
 3. **Params** — números editables, con estos valores de partida (mm / grados):
 
@@ -27,9 +27,9 @@ App web para generar **cajas de molde de silicona** a partir de un maestro STL u
 
 ### Sistemas (MVP)
 
-- **Adapted Box** — cáscara sobre la caja envolvente, con holgura, fondo con llaves, embudo y canal, abrazaderas laterales y pines de registro.
-- **Tray** — bandeja abierta arriba, fondo plano, una cavidad, abrazadera opcional, sin segunda mitad.
-- **2-Part Silicone** — plano de corte en Z (mitad del maestro por defecto), dos mitades, pines (Ø3) y agujeros (Ø3.25), embudo en el plano y sello perimetral.
+- **Adapted Box** — cáscara sobre la silueta 2D de la pieza (no la caja envolvente), con holgura, fondo con llaves, embudo y canal, abrazaderas laterales y pines de registro.
+- **Tray** — bandeja abierta arriba que sigue la silueta, fondo plano, una cavidad, abrazadera opcional, sin segunda mitad.
+- **2-Part Silicone** — plano de corte en Z (mitad del maestro por defecto), dos mitades que siguen la silueta, pines (Ø3) y agujeros (Ø3.25), embudo en el plano y sello perimetral.
 
 Si activas la división, cada pieza cabe en `splitMax` (250 mm). La espiga sobresale `splitOverlap` (2.5 mm): pin Ø `pinDiameter`, agujero Ø `holeDiameter`.
 

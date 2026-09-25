@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { bboxOf, bboxSize, sampleMaster, signedVolume, triangleCount } from "./cad/mesh";
 import { parseOBJ } from "./cad/obj";
+import { parseSVG } from "./cad/svg";
 import { generateMold } from "./cad/generate";
 import { initKernel, type Kernel } from "./cad/kernel";
 import { defaultParams, sanitizeParams } from "./cad/params";
@@ -24,17 +25,17 @@ const SYSTEMS: Array<{ id: SystemId; title: string; text: string }> = [
   {
     id: "adapted",
     title: "Adapted Box",
-    text: "Caja a la caja envolvente: holgura, fondo con llaves, embudo y canales, abrazaderas laterales y pines.",
+    text: "Caja que sigue la silueta: holgura, fondo con llaves, embudo y canales, abrazaderas laterales y pines.",
   },
   {
     id: "tray",
     title: "Tray",
-    text: "Bandeja abierta arriba, fondo plano, una sola cavidad. Abrazadera opcional. Sin segunda mitad.",
+    text: "Bandeja abierta que sigue la silueta, fondo plano, una sola cavidad. Abrazadera opcional. Sin segunda mitad.",
   },
   {
     id: "twopart",
     title: "2-Part Silicone",
-    text: "Plano de corte en Z (mitad por defecto). Dos mitades, pines, embudo en el plano y sello perimetral.",
+    text: "Plano de corte en Z (mitad por defecto). Dos mitades que siguen la silueta, pines, embudo en el plano y sello perimetral.",
   },
 ];
 
@@ -103,7 +104,8 @@ export default function App() {
     try {
       const buf = await file.arrayBuffer();
       const lower = file.name.toLowerCase();
-      const mesh = lower.endsWith(".obj") ? parseOBJ(new TextDecoder().decode(buf)) : parseSTL(buf);
+      const text = new TextDecoder().decode(buf);
+      const mesh = lower.endsWith(".svg") ? parseSVG(text) : lower.endsWith(".obj") ? parseOBJ(text) : parseSTL(buf);
       setMaster({ name: file.name, mesh });
       setStep("system");
     } catch (err) {
@@ -156,10 +158,10 @@ export default function App() {
                   if (file) void takeFile(file);
                 }}
               >
-                Suelta un STL u OBJ
+                Suelta un STL, OBJ o SVG
                 <input
                   type="file"
-                  accept=".stl,.obj,model/stl"
+                  accept=".stl,.obj,.svg,model/stl,image/svg+xml"
                   hidden
                   onChange={(e) => {
                     const file = e.target.files?.[0];
@@ -210,7 +212,9 @@ export default function App() {
                 <label htmlFor="rot">Giro Z</label>
                 <NumberField id="rot" value={rot} min={-180} max={180} step={15} onChange={setRot} aria-label="Giro Z" />
               </div>
-              <p className="hint">La pieza se apoya en Z=0 y se centra en XY. La contracción de colada, si la activas, escala el maestro.</p>
+              <p className="hint">
+                La pieza se apoya en Z=0 y se centra en XY. El molde sigue su silueta, no la caja envolvente. Un SVG sin data-depth se extruye 3 mm. La contracción de colada, si la activas, escala el maestro.
+              </p>
             </section>
           )}
 

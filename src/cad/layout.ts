@@ -1,5 +1,16 @@
 import { KEY_HEIGHT, KEY_INSET, KEY_SIZE, SEAL_H, SEAL_W } from "../constants";
 import type { MoldParams, SystemId, Vec3 } from "../types";
+import {
+  lerpLoop,
+  loftVolume,
+  loopBounds,
+  maxXAtY,
+  offsetClean,
+  pointInPoly,
+  rectLoop,
+  rightAnchor,
+  type Loop,
+} from "./outline";
 
 export interface BoxFeat {
   min: Vec3;
@@ -25,10 +36,23 @@ export interface FrustumFeat {
   hy1: number;
 }
 
+export interface PolyFeat {
+  /** CCW loop at z0. Paired by index with `top`. */
+  bottom: Loop;
+  /** CCW loop at z1. Same length and corner order as `bottom`. */
+  top: Loop;
+  z0: number;
+  z1: number;
+  /** Straight hole subtracted from the prism (perimeter seal). */
+  holeBottom?: Loop;
+  holeTop?: Loop;
+}
+
 export type Feat =
   | ({ kind: "box" } & BoxFeat)
   | ({ kind: "cyl" } & CylFeat)
-  | ({ kind: "frustum" } & FrustumFeat);
+  | ({ kind: "frustum" } & FrustumFeat)
+  | ({ kind: "poly" } & PolyFeat);
 
 export interface SolidSpec {
   id: string;
@@ -95,13 +119,88 @@ function cyl(feat: CylFeat): Feat {
   return { kind: "cyl", ...feat };
 }
 
-function frustum(f: FrustumFeat): Feat {
-  return { kind: "frustum", ...f };
+function poly(
+  bottom: Loop,
+  top: Loop,
+  z0: number,
+  z1: number,
+  hole?: { bottom: Loop; top: Loop },
+): Feat {
+  return {
+    kind: "poly",
+    bottom,
+    top,
+    z0,
+    z1,
+    holeBottom: hole?.bottom,
+    holeTop: hole?.top,
+  };
 }
 
-function hxAt(z: number, z0: number, h: number, hx0: number, hx1: number): number {
-  const t = h <= 1e-9 ? 0 : (z - z0) / h;
-  return hx0 + (hx1 - hx0) * t;
+interface Profile {
+  outer: Loop;
+  cavityBottom: Loop;
+  /** Loop at the top of the boolean carve (may overrun the rim so the top stays open). */
+  cavityTop: Loop;
+  /** Loop at the design rim, used for silicone volume. */
+  designTop: Loop;
+  innerW: number;
+  innerD: number;
+  outerW: number;
+  outerD: number;
+}
+
+function buildProfile(
+  partSize: Vec3,
+  gap: number,
+  wall: number,
+  extra: number,
+  topGrow: number,
+  outline: Loop | undefined,
+  warnings: string[],
+): Profile {
+  const rect = rectLoop(partSize[0], partSize[1]);
+  const make = (base: Loop) => {
+    const outer = offsetClean(base, gap + wall);
+    const cavityBottom = offsetClean(base, gap);
+    const designTop = offsetClean(base, gap + extra);
+    const carveTop = topGrow === 1 ? designTop : offsetClean(base, gap + extra * topGrow);
+    if (!outer || !cavityBottom || !designTop || !carveTop) return null;
+    return { outer, cavityBottom, cavityTop: carveTop, designTop };
+  };
+  let used = outline && outline.length >= 3 ? make(outline) : null;
+  if (!used) {
+    if (outline && outline.length >= 3) {
+      warnings.push("La silueta no admitió el offset; el molde usa la caja envolvente.");
+    }
+    used = make(rect);
+  }
+  if (!used) throw new Error("No se pudo construir la silueta del molde");
+  const inner = loopBounds(used.cavityBottom);
+  const outerB = loopBounds(used.outer);
+  return {
+    outer: used.outer,
+    cavityBottom: used.cavityBottom,
+    cavityTop: used.cavityTop,
+    designTop: used.designTop,
+    innerW: inner.w,
+    innerD: inner.h,
+    outerW: outerB.w,
+    outerD: outerB.h,
+  };
+}
+
+function centerOf(f: Feat): [number, number] | null {
+  if (f.kind === "box") return [f.min[0] + f.size[0] / 2, f.min[1] + f.size[1] / 2];
+  if (f.kind === "cyl") return [f.origin[0], f.origin[1]];
+  return null;
+}
+
+function keepInside(feats: Feat[], loop: Loop): Feat[] {
+  return feats.filter((f) => {
+    const c = centerOf(f);
+    return !c || pointInPoly(c, loop);
+  });
 }
 
 export function planMold(
@@ -109,11 +208,12 @@ export function planMold(
   partSize: Vec3,
   masterVolume: number,
   params: MoldParams,
+  outline?: Loop,
 ): MoldPlan {
   const [pw, pd, ph] = partSize;
   if (pw < 0.5 || pd < 0.5 || ph < 0.5) throw new Error("La pieza es demasiado pequeña");
-  if (system === "twopart") return planTwoPart(partSize, masterVolume, params);
-  return planOpenBox(system, partSize, masterVolume, params);
+  if (system === "twopart") return planTwoPart(partSize, masterVolume, params, outline);
+  return planOpenBox(system, partSize, masterVolume, params, outline);
 }
 
 function planOpenBox(
@@ -121,49 +221,38 @@ function planOpenBox(
   partSize: Vec3,
   masterVolume: number,
   params: MoldParams,
+  outline?: Loop,
 ): MoldPlan {
-  const [pw, pd, ph] = partSize;
+  const ph = partSize[2];
   const wall = params.wallThickness;
   const gap = params.siliconeGap;
-  const innerW = pw + 2 * gap;
-  const innerD = pd + 2 * gap;
   const innerH = ph + gap;
   const floor = wall;
-  const outerW = innerW + 2 * wall;
-  const outerD = innerD + 2 * wall;
   const outerH = floor + innerH;
   const { extra, clamped } = draftExtra(wall, innerH, params.draftDeg);
   const open = 0.08;
-  const hx0 = innerW / 2;
-  const hy0 = innerD / 2;
-  const hx1 = innerW / 2 + extra;
-  const hy1 = innerD / 2 + extra;
   const grow = innerH > 1e-9 ? (innerH + open) / innerH : 1;
   const warnings: string[] = [];
   if (clamped) warnings.push("El ángulo de salida se limitó para dejar al menos 1 mm de pared arriba.");
+  const profile = buildProfile(partSize, gap, wall, extra, grow, outline, warnings);
+  const { innerW, innerD, outerW, outerD, outer, cavityBottom, cavityTop, designTop } = profile;
 
-  const unions: Feat[] = [box([-outerW / 2, -outerD / 2, 0], [outerW, outerD, outerH])];
-  const carve: Feat[] = [
-    frustum({
-      z0: floor,
-      z1: outerH + open,
-      hx0,
-      hy0,
-      hx1: hx0 + (hx1 - hx0) * grow,
-      hy1: hy0 + (hy1 - hy0) * grow,
-    }),
-  ];
+  const unions: Feat[] = [poly(outer, outer, 0, outerH)];
+  const carve: Feat[] = [poly(cavityBottom, cavityTop, floor, outerH + open)];
   const subtracts: Feat[] = [];
 
   let displaced = 0;
   if (system === "adapted") {
-    const keys = placeKeys(innerW, innerD, innerH, floor);
+    const keys = keepInside(placeKeys(innerW, innerD, innerH, floor), cavityBottom);
     if (keys.length) {
       unions.push(...keys);
       displaced += keys.length * KEY_SIZE * KEY_SIZE * KEY_HEIGHT;
     } else warnings.push("La cavidad es pequeña: se omitieron las llaves del fondo.");
 
-    const pins = placeFloorPins(innerW, innerD, innerH, floor, params.pinDiameter, params.pinReach);
+    const pins = keepInside(
+      placeFloorPins(innerW, innerD, innerH, floor, params.pinDiameter, params.pinReach),
+      cavityBottom,
+    );
     if (pins.length) {
       unions.push(...pins);
       const r = params.pinDiameter / 2;
@@ -171,7 +260,8 @@ function planOpenBox(
     } else warnings.push("La cavidad es pequeña: se omitieron los pines de registro.");
 
     const channelZ = channelCenter(floor, innerH, params.channelH);
-    const cup = placeSideFunnel(outerW, wall, params, channelZ);
+    const t = Math.min(1, Math.max(0, (channelZ - floor) / innerH));
+    const cup = placeSideFunnel(outer, lerpLoop(cavityBottom, cavityTop, t), wall, params, channelZ);
     unions.push(cup.outer);
     subtracts.push(cup.channel, cup.inner);
   }
@@ -192,7 +282,7 @@ function planOpenBox(
       ? Math.PI * (params.funnelDiameter / 2) ** 2 * Math.max(0, params.funnelDiameter - wall) +
         params.channelW * params.channelH * wall
       : 0;
-  const cav = frustumVolume(hx0, hy0, hx1, hy1, innerH);
+  const cav = loftVolume(cavityBottom, designTop, innerH);
   const siliconeMm3 = Math.max(0, cav - masterVolume - displaced + funnelVol);
 
   const solids: SolidSpec[] = [
@@ -290,25 +380,28 @@ function channelCenter(floor: number, innerH: number, chH: number): number {
 }
 
 function placeSideFunnel(
-  outerW: number,
+  outerLoop: Loop,
+  cavityLoop: Loop,
   wall: number,
   params: MoldParams,
   channelZ: number,
 ): { outer: Feat; inner: Feat; channel: Feat } {
+  const anchor = rightAnchor(outerLoop);
   const innerR = params.funnelDiameter / 2;
   const outerR = innerR + wall;
   const cupBottom = Math.max(0, channelZ - params.channelH / 2 - wall - 0.4);
   const cupTop = Math.max(cupBottom + params.funnelDiameter, channelZ + params.channelH / 2 + wall + 1);
-  const centerX = outerW / 2 + outerR - 0.6;
+  const centerX = anchor.x + outerR - 0.6;
+  const cavX = maxXAtY(cavityLoop, anchor.y) ?? anchor.x - wall;
   const channel: Feat = box(
-    [outerW / 2 - wall - 0.4, -params.channelW / 2, channelZ - params.channelH / 2],
-    [centerX - (outerW / 2 - wall - 0.4), params.channelW, params.channelH],
+    [cavX - 0.4, anchor.y - params.channelW / 2, channelZ - params.channelH / 2],
+    [Math.max(0.2, centerX - (cavX - 0.4)), params.channelW, params.channelH],
   );
   return {
-    outer: cyl({ axis: "z", origin: [centerX, 0, cupBottom], height: cupTop - cupBottom, radius: outerR }),
+    outer: cyl({ axis: "z", origin: [centerX, anchor.y, cupBottom], height: cupTop - cupBottom, radius: outerR }),
     inner: cyl({
       axis: "z",
-      origin: [centerX, 0, cupBottom + wall],
+      origin: [centerX, anchor.y, cupBottom + wall],
       height: cupTop - cupBottom - wall + 0.4,
       radius: innerR,
     }),
@@ -337,55 +430,60 @@ function placeClampPads(slot: number): Feat[] {
   ];
 }
 
-function planTwoPart(partSize: Vec3, masterVolume: number, params: MoldParams): MoldPlan {
-  const [pw, pd, ph] = partSize;
+function planTwoPart(partSize: Vec3, masterVolume: number, params: MoldParams, outline?: Loop): MoldPlan {
+  const ph = partSize[2];
   const wall = params.wallThickness;
   const gap = params.siliconeGap;
-  const innerW = pw + 2 * gap;
-  const innerD = pd + 2 * gap;
   const innerH = ph + 2 * gap;
   const floor = wall;
-  const outerW = innerW + 2 * wall;
-  const outerD = innerD + 2 * wall;
   const outerH = floor + innerH + wall;
   const cutZ = floor + gap + ph * params.cutRatio;
   const { extra, clamped } = draftExtra(wall, innerH, params.draftDeg);
   const cavZ0 = floor;
   const cavZ1 = floor + innerH;
-  const hx0 = innerW / 2;
-  const hy0 = innerD / 2;
-  const hx1 = innerW / 2 + extra;
-  const hy1 = innerD / 2 + extra;
   const warnings: string[] = [];
   if (clamped) warnings.push("El ángulo de salida se limitó para dejar al menos 1 mm de pared.");
+  const profile = buildProfile(partSize, gap, wall, extra, 1, outline, warnings);
+  const { innerW, innerD, outerW, outerD, outer, cavityBottom, cavityTop, designTop } = profile;
+  const tCut = innerH > 1e-9 ? (cutZ - cavZ0) / innerH : 0;
+  const cavCut = lerpLoop(cavityBottom, cavityTop, tCut);
 
-  const hxCut = hxAt(cutZ, cavZ0, innerH, hx0, hx1);
-  const hyCut = hxAt(cutZ, cavZ0, innerH, hy0, hy1);
-  const wallX = outerW / 2 - hxCut;
-  const wallY = outerD / 2 - hyCut;
-  const tongueW = Math.min(SEAL_W, wallX - 0.5, wallY - 0.5);
-  const corner = Math.max(params.holeDiameter + 2.5, 7);
-  const tongues =
-    tongueW >= 0.8 ? rimBars(outerW, outerD, hxCut, hyCut, tongueW, cutZ - 0.2, SEAL_H + 0.2, corner) : [];
-  const grooves =
-    tongueW >= 0.8
-      ? rimBars(
-          outerW,
-          outerD,
-          hxCut,
-          hyCut,
-          tongueW + params.clampClearance,
-          cutZ,
-          SEAL_H + params.clampClearance,
-          corner - params.clampClearance,
-        )
-      : [];
+  const margin = 0.55;
+  const room = wall - margin * 2;
+  const tongues: Feat[] = [];
+  const grooves: Feat[] = [];
+  if (room >= 0.8 && outer.length === cavCut.length) {
+    const tongueW = Math.min(SEAL_W, room);
+    const t0 = margin / wall;
+    const t1 = Math.min(0.96, (margin + tongueW) / wall);
+    const tongueInner = lerpLoop(cavCut, outer, t0);
+    const tongueOuter = lerpLoop(cavCut, outer, t1);
+    tongues.push(
+      poly(tongueOuter, tongueOuter, cutZ - 0.2, cutZ - 0.2 + SEAL_H + 0.2, {
+        bottom: tongueInner,
+        top: tongueInner,
+      }),
+    );
+    const clearance = params.clampClearance;
+    const g0 = Math.max(0.02, (margin - clearance / 2) / wall);
+    const g1 = Math.min(0.98, (margin + tongueW + clearance / 2) / wall);
+    grooves.push(
+      poly(lerpLoop(cavCut, outer, g1), lerpLoop(cavCut, outer, g1), cutZ, cutZ + SEAL_H + clearance, {
+        bottom: lerpLoop(cavCut, outer, g0),
+        top: lerpLoop(cavCut, outer, g0),
+      }),
+    );
+  }
   if (!tongues.length) warnings.push("El borde es estrecho: se omitió el sello perimetral.");
 
+  const hxCut = loopBounds(cavCut).maxX;
+  const hyCut = loopBounds(cavCut).maxY;
+  const wallX = outerW / 2 - hxCut;
+  const wallY = outerD / 2 - hyCut;
   const px = (hxCut + outerW / 2) / 2;
   const py = (hyCut + outerD / 2) / 2;
   const pinsOk = wallX > params.pinDiameter * 0.45 && wallY > params.pinDiameter * 0.45;
-  const pinSpots: Array<[number, number]> = pinsOk
+  const pinCandidates: Array<[number, number]> = pinsOk
     ? [
         [px, py],
         [px, -py],
@@ -393,6 +491,7 @@ function planTwoPart(partSize: Vec3, masterVolume: number, params: MoldParams): 
         [-px, -py],
       ]
     : [];
+  const pinSpots = pinCandidates.filter(([x, y]) => pointInPoly([x, y], outer) && !pointInPoly([x, y], cavCut));
   if (!pinSpots.length) warnings.push("El borde es estrecho: se omitieron los pines.");
 
   const pins: Feat[] = pinSpots.map(([x, y]) =>
@@ -420,35 +519,18 @@ function planTwoPart(partSize: Vec3, masterVolume: number, params: MoldParams): 
     }),
   );
 
-  const cup = placePartingFunnel(outerW, wall, cutZ, params, hxCut);
+  const cup = placePartingFunnel(outer, cavCut, wall, cutZ, params);
 
-  const bottomCarve = frustum({
-    z0: cavZ0,
-    z1: cutZ + 0.08,
-    hx0,
-    hy0,
-    hx1: hxAt(cutZ + 0.08, cavZ0, innerH, hx0, hx1),
-    hy1: hxAt(cutZ + 0.08, cavZ0, innerH, hy0, hy1),
-  });
-  const topCarve = frustum({
-    z0: cutZ - 0.08,
-    z1: cavZ1,
-    hx0: hxAt(cutZ - 0.08, cavZ0, innerH, hx0, hx1),
-    hy0: hxAt(cutZ - 0.08, cavZ0, innerH, hy0, hy1),
-    hx1,
-    hy1,
-  });
+  const tBottom = innerH > 1e-9 ? (cutZ + 0.08 - cavZ0) / innerH : 0;
+  const tTop = innerH > 1e-9 ? (cutZ - 0.08 - cavZ0) / innerH : 0;
+  const bottomCarve = poly(cavityBottom, lerpLoop(cavityBottom, cavityTop, tBottom), cavZ0, cutZ + 0.08);
+  const topCarve = poly(lerpLoop(cavityBottom, cavityTop, tTop), cavityTop, cutZ - 0.08, cavZ1);
 
   const bottom: SolidSpec = {
     id: "2part_bottom",
     role: "mold",
     split: true,
-    unions: [
-      box([-outerW / 2, -outerD / 2, 0], [outerW, outerD, cutZ]),
-      ...tongues,
-      ...pins,
-      cup.outerBottom,
-    ],
+    unions: [poly(outer, outer, 0, cutZ), ...tongues, ...pins, cup.outerBottom],
     carve: [bottomCarve],
     subtracts: [cup.channel, cup.innerBottom],
   };
@@ -456,16 +538,12 @@ function planTwoPart(partSize: Vec3, masterVolume: number, params: MoldParams): 
     id: "2part_top",
     role: "mold",
     split: true,
-    unions: [
-      box([-outerW / 2, -outerD / 2, cutZ], [outerW, outerD, outerH - cutZ]),
-      ...bosses,
-      cup.outerTop,
-    ],
+    unions: [poly(outer, outer, cutZ, outerH), ...bosses, cup.outerTop],
     carve: [topCarve],
     subtracts: [...grooves, ...holes, cup.channel, cup.innerTop],
   };
 
-  const cav = frustumVolume(hx0, hy0, hx1, hy1, innerH);
+  const cav = loftVolume(cavityBottom, designTop, innerH);
   const funnelVol =
     Math.PI * (params.funnelDiameter / 2) ** 2 * Math.max(0, params.funnelDiameter - wall) +
     params.channelW * params.channelH * wall;
@@ -501,45 +579,22 @@ function planTwoPart(partSize: Vec3, masterVolume: number, params: MoldParams): 
   };
 }
 
-function rimBars(
-  outerW: number,
-  outerD: number,
-  hx: number,
-  hy: number,
-  width: number,
-  z: number,
-  height: number,
-  corner: number,
-): Feat[] {
-  const xMid = (hx + outerW / 2) / 2;
-  const yMid = (hy + outerD / 2) / 2;
-  const y0 = -outerD / 2 + corner;
-  const y1 = outerD / 2 - corner;
-  const x0 = -outerW / 2 + corner;
-  const x1 = outerW / 2 - corner;
-  if (y1 - y0 < 4 || x1 - x0 < 4 || width < 0.4) return [];
-  return [
-    box([xMid - width / 2, y0, z], [width, y1 - y0, height]),
-    box([-xMid - width / 2, y0, z], [width, y1 - y0, height]),
-    box([x0, yMid - width / 2, z], [x1 - x0, width, height]),
-    box([x0, -yMid - width / 2, z], [x1 - x0, width, height]),
-  ];
-}
-
-function placePartingFunnel(outerW: number, wall: number, cutZ: number, params: MoldParams, hxCut: number) {
+function placePartingFunnel(outerLoop: Loop, cavityLoop: Loop, wall: number, cutZ: number, params: MoldParams) {
+  const anchor = rightAnchor(outerLoop);
   const innerR = params.funnelDiameter / 2;
   const outerR = innerR + wall;
   const cupH = params.funnelDiameter;
   const cupBottom = cutZ - cupH / 2;
-  const centerX = outerW / 2 + outerR - 0.6;
+  const centerX = anchor.x + outerR - 0.6;
+  const cavX = maxXAtY(cavityLoop, anchor.y) ?? anchor.x - wall;
   const channel = box(
-    [hxCut - 0.3, -params.channelW / 2, cutZ - params.channelH / 2],
-    [centerX - (hxCut - 0.3), params.channelW, params.channelH],
+    [cavX - 0.3, anchor.y - params.channelW / 2, cutZ - params.channelH / 2],
+    [Math.max(0.2, centerX - (cavX - 0.3)), params.channelW, params.channelH],
   );
   const outerCyl = (zMin: number, zMax: number): Feat =>
     cyl({
       axis: "z",
-      origin: [centerX, 0, cupBottom],
+      origin: [centerX, anchor.y, cupBottom],
       height: cupH,
       radius: outerR,
       zMin,
@@ -548,7 +603,7 @@ function placePartingFunnel(outerW: number, wall: number, cutZ: number, params: 
   const innerCyl = (zMin: number, zMax: number): Feat =>
     cyl({
       axis: "z",
-      origin: [centerX, 0, cupBottom + wall],
+      origin: [centerX, anchor.y, cupBottom + wall],
       height: cupH - wall + 0.4,
       radius: innerR,
       zMin,
