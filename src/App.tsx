@@ -3,6 +3,7 @@ import { bboxOf, bboxSize, sampleMaster, signedVolume, triangleCount } from "./c
 import { parseOBJ } from "./cad/obj";
 import { parseSVG } from "./cad/svg";
 import { generateMold } from "./cad/generate";
+import { profileHint, profileLabel } from "./cad/layout";
 import { initKernel, type Kernel } from "./cad/kernel";
 import { defaultParams, sanitizeParams } from "./cad/params";
 import { parseSTL } from "./cad/stl";
@@ -337,6 +338,11 @@ export default function App() {
           <div className="preview-card">
             <div className="preview-hd">
               <b>{systemTitle}</b>
+              {built && (
+                <span className={`pill ${profilePill(built.profileMode)}`} title={profileHint(built.profileMode)}>
+                  {profileLabel(built.profileMode)}
+                </span>
+              )}
               {built && <span className="pill">{formatVolume(built.siliconeMm3)}</span>}
               {!kernel && !bootError && <span className="hint">Cargando núcleo CAD…</span>}
             </div>
@@ -358,6 +364,7 @@ export default function App() {
                 <p className="hint">
                   <b>Silicona estimada</b> {built ? formatVolume(built.siliconeMm3) : "—"} — cavidad menos el maestro, más embudo y canal.
                 </p>
+                {built && <p className="hint">{profileHint(built.profileMode)}</p>}
               </div>
             </div>
           </div>
@@ -365,6 +372,12 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+function profilePill(mode: "silhouette" | "rect" | "bbox"): string {
+  if (mode === "bbox") return "pill-warn";
+  if (mode === "rect") return "pill-rect";
+  return "";
 }
 
 function formatVolume(mm3: number): string {

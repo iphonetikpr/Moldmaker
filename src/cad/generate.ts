@@ -7,7 +7,7 @@ import { writeSTL } from "./stl";
 import { partFilename, safeName } from "./export";
 import type { Kernel } from "./kernel";
 import { planMold, type SolidSpec } from "./layout";
-import { rectLoop } from "./outline";
+import type { Loop } from "./outline";
 import { planSplits } from "./split";
 
 export interface GenerateInput {
@@ -29,14 +29,18 @@ export function generateMold(kernel: Kernel, input: GenerateInput): MoldResult {
   const masterVolume = Math.abs(signedVolume(master));
   const warnings = [...repaired.warnings];
 
-  let outline = rectLoop(size[0], size[1]);
+  let outline: Loop | undefined;
   try {
-    outline = kernel.projectOutline(master);
+    const hit = kernel.projectOutline(master);
+    if (hit.exact) outline = hit.loop;
+    else warnings.push("No se pudo leer la silueta. El molde usa la caja envolvente de la pieza.");
   } catch {
     warnings.push("No se pudo leer la silueta. El molde usa la caja envolvente de la pieza.");
   }
 
-  const plan = planMold(input.system, size, masterVolume, params, outline);
+  const plan = planMold(input.system, size, masterVolume, params, outline, (loop, delta) =>
+    kernel.offsetOutline(loop, delta),
+  );
   warnings.push(...plan.warnings);
 
   const base = safeName(input.name);
@@ -80,6 +84,7 @@ export function generateMold(kernel: Kernel, input: GenerateInput): MoldResult {
     siliconeMm3: plan.metrics.siliconeMm3,
     warnings: unique(warnings),
     system: input.system,
+    profileMode: plan.profileMode,
   };
 }
 

@@ -257,6 +257,16 @@ select {
   font-family: var(--mono);
 }
 
+.pill-rect {
+  background: color-mix(in srgb, var(--muted) 22%, transparent);
+  color: var(--text);
+}
+
+.pill-warn {
+  background: color-mix(in srgb, var(--warn) 18%, transparent);
+  color: var(--warn);
+}
+
 .drop {
   display: block;
   background: var(--bg);

@@ -1,12 +1,14 @@
 import { KEY_HEIGHT, KEY_INSET, KEY_SIZE, SEAL_H, SEAL_W } from "../constants";
 import type { MoldParams, SystemId, Vec3 } from "../types";
 import {
+  isAxisAlignedRect,
   lerpLoop,
   loftVolume,
   loopBounds,
   maxXAtY,
   offsetClean,
   pointInPoly,
+  polyArea,
   rectLoop,
   rightAnchor,
   type Loop,
@@ -90,12 +92,36 @@ export interface MoldMetrics {
   siliconeMm3: number;
 }
 
+/**
+ * How the cavity outline was chosen.
+ * `silhouette` — the part's XY contour survived the offset.
+ * `rect` — that contour is itself an axis-aligned rectangle.
+ * `bbox` — the offset failed and the mold fell back to the bounding box.
+ */
+export type ProfileMode = "silhouette" | "rect" | "bbox";
+
+export function profileLabel(mode: ProfileMode): string {
+  if (mode === "bbox") return "Caja envolvente";
+  if (mode === "rect") return "Silueta rectangular";
+  return "Silueta";
+}
+
+export function profileHint(mode: ProfileMode): string {
+  if (mode === "bbox") return "La silueta no se pudo expandir; la cavidad es la caja envolvente.";
+  if (mode === "rect") return "La proyección en planta de la pieza es rectangular, así que la cavidad también lo es.";
+  return "La cavidad sigue la silueta de la pieza, no su caja envolvente.";
+}
+
+/** Positive delta grows a CCW loop. Return null when the offset is unusable. */
+export type OffsetFn = (loop: Loop, delta: number) => Loop | null;
+
 export interface MoldPlan {
   system: SystemId;
   warnings: string[];
   masterLift: number;
   metrics: MoldMetrics;
   solids: SolidSpec[];
+  profileMode: ProfileMode;
 }
 
 export function frustumVolume(hx0: number, hy0: number, hx1: number, hy1: number, h: number): number {
@@ -148,6 +174,11 @@ interface Profile {
   innerD: number;
   outerW: number;
   outerD: number;
+  profileMode: ProfileMode;
+  /** Offset of the loop the profile was built from, or of any other loop. */
+  offset: OffsetFn;
+  /** Offset of the source silhouette (or of the bbox, after a fallback). */
+  at: (delta: number) => Loop | null;
 }
 
 function buildProfile(
@@ -158,26 +189,28 @@ function buildProfile(
   topGrow: number,
   outline: Loop | undefined,
   warnings: string[],
+  offset: OffsetFn,
 ): Profile {
   const rect = rectLoop(partSize[0], partSize[1]);
   const make = (base: Loop) => {
-    const outer = offsetClean(base, gap + wall);
-    const cavityBottom = offsetClean(base, gap);
-    const designTop = offsetClean(base, gap + extra);
-    const carveTop = topGrow === 1 ? designTop : offsetClean(base, gap + extra * topGrow);
+    const outer = offset(base, gap + wall);
+    const cavityBottom = offset(base, gap);
+    const designTop = offset(base, gap + extra);
+    const carveDelta = gap + extra * topGrow;
+    const carveTop = Math.abs(carveDelta - (gap + extra)) < 1e-9 ? designTop : offset(base, carveDelta);
     if (!outer || !cavityBottom || !designTop || !carveTop) return null;
-    return { outer, cavityBottom, cavityTop: carveTop, designTop };
+    if (polyArea(outer) <= 1e-3 || polyArea(cavityBottom) <= 1e-3) return null;
+    return { base, outer, cavityBottom, cavityTop: carveTop, designTop };
   };
-  let used = outline && outline.length >= 3 ? make(outline) : null;
-  if (!used) {
-    if (outline && outline.length >= 3) {
-      warnings.push("La silueta no admitió el offset; el molde usa la caja envolvente.");
-    }
-    used = make(rect);
+  const fromOutline = outline && outline.length >= 3 ? make(outline) : null;
+  const used = fromOutline ?? make(rect);
+  if (!fromOutline && outline && outline.length >= 3) {
+    warnings.push("La silueta no admitió el offset; el molde usa la caja envolvente.");
   }
   if (!used) throw new Error("No se pudo construir la silueta del molde");
   const inner = loopBounds(used.cavityBottom);
   const outerB = loopBounds(used.outer);
+  const rectangular = isAxisAlignedRect(used.base);
   return {
     outer: used.outer,
     cavityBottom: used.cavityBottom,
@@ -187,6 +220,9 @@ function buildProfile(
     innerD: inner.h,
     outerW: outerB.w,
     outerD: outerB.h,
+    profileMode: fromOutline ? (rectangular ? "rect" : "silhouette") : "bbox",
+    offset,
+    at: (delta) => offset(used.base, delta),
   };
 }
 
@@ -209,11 +245,12 @@ export function planMold(
   masterVolume: number,
   params: MoldParams,
   outline?: Loop,
+  offset: OffsetFn = offsetClean,
 ): MoldPlan {
   const [pw, pd, ph] = partSize;
   if (pw < 0.5 || pd < 0.5 || ph < 0.5) throw new Error("La pieza es demasiado pequeña");
-  if (system === "twopart") return planTwoPart(partSize, masterVolume, params, outline);
-  return planOpenBox(system, partSize, masterVolume, params, outline);
+  if (system === "twopart") return planTwoPart(partSize, masterVolume, params, outline, offset);
+  return planOpenBox(system, partSize, masterVolume, params, outline, offset);
 }
 
 function planOpenBox(
@@ -221,7 +258,8 @@ function planOpenBox(
   partSize: Vec3,
   masterVolume: number,
   params: MoldParams,
-  outline?: Loop,
+  outline: Loop | undefined,
+  offset: OffsetFn,
 ): MoldPlan {
   const ph = partSize[2];
   const wall = params.wallThickness;
@@ -234,7 +272,7 @@ function planOpenBox(
   const grow = innerH > 1e-9 ? (innerH + open) / innerH : 1;
   const warnings: string[] = [];
   if (clamped) warnings.push("El ángulo de salida se limitó para dejar al menos 1 mm de pared arriba.");
-  const profile = buildProfile(partSize, gap, wall, extra, grow, outline, warnings);
+  const profile = buildProfile(partSize, gap, wall, extra, grow, outline, warnings, offset);
   const { innerW, innerD, outerW, outerD, outer, cavityBottom, cavityTop, designTop } = profile;
 
   const unions: Feat[] = [poly(outer, outer, 0, outerH)];
@@ -261,7 +299,8 @@ function planOpenBox(
 
     const channelZ = channelCenter(floor, innerH, params.channelH);
     const t = Math.min(1, Math.max(0, (channelZ - floor) / innerH));
-    const cup = placeSideFunnel(outer, lerpLoop(cavityBottom, cavityTop, t), wall, params, channelZ);
+    const cavityAtChannel = profile.at(gap + extra * grow * t) ?? cavityBottom;
+    const cup = placeSideFunnel(outer, cavityAtChannel, wall, params, channelZ);
     unions.push(cup.outer);
     subtracts.push(cup.channel, cup.inner);
   }
@@ -333,6 +372,7 @@ function planOpenBox(
       siliconeMm3,
     },
     solids,
+    profileMode: profile.profileMode,
   };
 }
 
@@ -430,7 +470,13 @@ function placeClampPads(slot: number): Feat[] {
   ];
 }
 
-function planTwoPart(partSize: Vec3, masterVolume: number, params: MoldParams, outline?: Loop): MoldPlan {
+function planTwoPart(
+  partSize: Vec3,
+  masterVolume: number,
+  params: MoldParams,
+  outline: Loop | undefined,
+  offset: OffsetFn,
+): MoldPlan {
   const ph = partSize[2];
   const wall = params.wallThickness;
   const gap = params.siliconeGap;
@@ -443,36 +489,38 @@ function planTwoPart(partSize: Vec3, masterVolume: number, params: MoldParams, o
   const cavZ1 = floor + innerH;
   const warnings: string[] = [];
   if (clamped) warnings.push("El ángulo de salida se limitó para dejar al menos 1 mm de pared.");
-  const profile = buildProfile(partSize, gap, wall, extra, 1, outline, warnings);
+  const profile = buildProfile(partSize, gap, wall, extra, 1, outline, warnings, offset);
   const { innerW, innerD, outerW, outerD, outer, cavityBottom, cavityTop, designTop } = profile;
   const tCut = innerH > 1e-9 ? (cutZ - cavZ0) / innerH : 0;
-  const cavCut = lerpLoop(cavityBottom, cavityTop, tCut);
+  const cavCut = profile.at(gap + extra * tCut) ?? lerpLoop(cavityBottom, cavityTop, tCut);
 
   const margin = 0.55;
   const room = wall - margin * 2;
   const tongues: Feat[] = [];
   const grooves: Feat[] = [];
-  if (room >= 0.8 && outer.length === cavCut.length) {
+  if (room >= 0.8) {
     const tongueW = Math.min(SEAL_W, room);
-    const t0 = margin / wall;
-    const t1 = Math.min(0.96, (margin + tongueW) / wall);
-    const tongueInner = lerpLoop(cavCut, outer, t0);
-    const tongueOuter = lerpLoop(cavCut, outer, t1);
-    tongues.push(
-      poly(tongueOuter, tongueOuter, cutZ - 0.2, cutZ - 0.2 + SEAL_H + 0.2, {
-        bottom: tongueInner,
-        top: tongueInner,
-      }),
-    );
+    const tongueInner = profile.offset(cavCut, margin);
+    const tongueOuter = profile.offset(cavCut, margin + tongueW);
+    if (tongueInner && tongueOuter) {
+      tongues.push(
+        poly(tongueOuter, tongueOuter, cutZ - 0.2, cutZ - 0.2 + SEAL_H + 0.2, {
+          bottom: tongueInner,
+          top: tongueInner,
+        }),
+      );
+    }
     const clearance = params.clampClearance;
-    const g0 = Math.max(0.02, (margin - clearance / 2) / wall);
-    const g1 = Math.min(0.98, (margin + tongueW + clearance / 2) / wall);
-    grooves.push(
-      poly(lerpLoop(cavCut, outer, g1), lerpLoop(cavCut, outer, g1), cutZ, cutZ + SEAL_H + clearance, {
-        bottom: lerpLoop(cavCut, outer, g0),
-        top: lerpLoop(cavCut, outer, g0),
-      }),
-    );
+    const grooveInner = profile.offset(cavCut, Math.max(0.05, margin - clearance / 2));
+    const grooveOuter = profile.offset(cavCut, margin + tongueW + clearance / 2);
+    if (grooveInner && grooveOuter) {
+      grooves.push(
+        poly(grooveOuter, grooveOuter, cutZ, cutZ + SEAL_H + clearance, {
+          bottom: grooveInner,
+          top: grooveInner,
+        }),
+      );
+    }
   }
   if (!tongues.length) warnings.push("El borde es estrecho: se omitió el sello perimetral.");
 
@@ -523,8 +571,10 @@ function planTwoPart(partSize: Vec3, masterVolume: number, params: MoldParams, o
 
   const tBottom = innerH > 1e-9 ? (cutZ + 0.08 - cavZ0) / innerH : 0;
   const tTop = innerH > 1e-9 ? (cutZ - 0.08 - cavZ0) / innerH : 0;
-  const bottomCarve = poly(cavityBottom, lerpLoop(cavityBottom, cavityTop, tBottom), cavZ0, cutZ + 0.08);
-  const topCarve = poly(lerpLoop(cavityBottom, cavityTop, tTop), cavityTop, cutZ - 0.08, cavZ1);
+  const bottomLip = profile.at(gap + extra * tBottom) ?? cavityBottom;
+  const topLip = profile.at(gap + extra * tTop) ?? cavityTop;
+  const bottomCarve = poly(cavityBottom, bottomLip, cavZ0, cutZ + 0.08);
+  const topCarve = poly(topLip, cavityTop, cutZ - 0.08, cavZ1);
 
   const bottom: SolidSpec = {
     id: "2part_bottom",
@@ -576,6 +626,7 @@ function planTwoPart(partSize: Vec3, masterVolume: number, params: MoldParams, o
       siliconeMm3,
     },
     solids: [bottom, top],
+    profileMode: profile.profileMode,
   };
 }
 

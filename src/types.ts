@@ -62,4 +62,6 @@ export interface MoldResult {
   siliconeMm3: number;
   warnings: string[];
   system: SystemId;
+  /** Whether the cavity followed the part outline or the bounding box. */
+  profileMode: "silhouette" | "rect" | "bbox";
 }

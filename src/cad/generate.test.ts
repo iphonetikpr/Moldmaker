@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { bboxOf, bboxSize, boxMesh } from "./mesh";
-import { parseSTL } from "./stl";
+import { parseSTL, writeSTL } from "./stl";
 import { defaultParams } from "./params";
 import { initKernel } from "./kernel";
 import { generateMold } from "./generate";
 import { sampleMaster } from "./mesh";
-import { loftMesh, polyArea } from "./outline";
+import { loftMesh, offsetClean, polyArea, type Loop } from "./outline";
+import { profileLabel } from "./layout";
 import { parseSVG } from "./svg";
 
 describe("generate", () => {
@@ -137,7 +138,7 @@ describe("generate", () => {
       [-15, 15],
     ];
     const mesh = loftMesh(foot, foot, 0, 8);
-    const outline = kernel.projectOutline(mesh);
+    const outline = kernel.projectOutline(mesh).loop;
     expect(Math.abs(polyArea(outline))).toBeCloseTo(576, 0);
     expect(Math.abs(polyArea(outline))).toBeLessThan(30 * 30 * 0.8);
 
@@ -188,4 +189,85 @@ describe("generate", () => {
     expect(outside).toHaveLength(0);
     expect(inside.length).toBeGreaterThan(0);
   });
+
+  it("labels the sample part as a rectangular silhouette", async () => {
+    const kernel = await initKernel();
+    const tray = generateMold(kernel, {
+      mesh: sampleMaster(),
+      name: "ejemplo",
+      system: "tray",
+      params: { ...defaultParams(), clampEnabled: false },
+      up: "z+",
+      rotDeg: 0,
+    });
+    expect(tray.profileMode).toBe("rect");
+    expect(profileLabel(tray.profileMode)).toBe("Silueta rectangular");
+  });
+
+  it("keeps a concave STL silhouette that the naive offset would reject", async () => {
+    const kernel = await initKernel();
+    const foot = organicLoop();
+    expect(offsetClean(foot, 3.5)).toBeNull();
+    const mesh = parseSTL(writeSTL(loftMesh(foot, foot, 0, 14), "organo"));
+    const hit = kernel.projectOutline(mesh);
+    expect(hit.exact).toBe(true);
+    expect(Math.abs(polyArea(hit.loop))).toBeGreaterThan(Math.abs(polyArea(foot)) * 0.9);
+    expect(Math.abs(polyArea(hit.loop))).toBeLessThan(bboxArea(hit.loop) * 0.7);
+
+    // (0,-16) sits in the part's bounding box and in a bay. A bbox cavity is empty
+    // there; the silhouette wall is not. (0,-22) is in the bbox wall margin and
+    // outside the offset shell.
+    const z = 8;
+    const probe = (mesh: ReturnType<typeof loftMesh>, x: number, y: number) => {
+      const bit = kernel.box([x - 0.35, y - 0.35, z - 0.35], [0.7, 0.7, 0.7]);
+      return kernel.intersect(kernel.fromMesh(mesh), bit).volume();
+    };
+    for (const system of ["tray", "adapted", "twopart"] as const) {
+      const built = generateMold(kernel, {
+        mesh,
+        name: "organo.stl",
+        system,
+        params: { ...defaultParams(), draftDeg: 0, clampEnabled: false, splitEnabled: false },
+        up: "z+",
+        rotDeg: 0,
+      });
+      expect(built.profileMode).toBe("silhouette");
+      expect(profileLabel(built.profileMode)).toBe("Silueta");
+      expect(built.warnings.some((w) => w.toLowerCase().includes("caja envolvente"))).toBe(false);
+      const molds = built.parts.filter((p) => p.role === "mold");
+      expect(molds.length).toBeGreaterThan(0);
+      const bayWall = molds.reduce((s, p) => s + probe(p.mesh, 0, -16), 0);
+      const outside = molds.reduce((s, p) => s + probe(p.mesh, 0, -22), 0);
+      const cavity = molds.reduce((s, p) => s + probe(p.mesh, 0, 18), 0);
+      expect(bayWall).toBeGreaterThan(0.05);
+      expect(outside).toBeLessThan(1e-4);
+      expect(cavity).toBeLessThan(1e-4);
+    }
+  });
 });
+
+/** Five-lobe outline. A 3.5 mm miter offset self-intersects; Clipper must not. */
+function organicLoop(): Loop {
+  const pts: Loop = [];
+  const n = 64;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    const r = 18 + 7 * Math.sin(5 * a) + 2.5 * Math.sin(13 * a);
+    pts.push([Math.cos(a) * r, Math.sin(a) * r]);
+  }
+  return pts;
+}
+
+function bboxArea(loop: Loop): number {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const [x, y] of loop) {
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  return (maxX - minX) * (maxY - minY);
+}
