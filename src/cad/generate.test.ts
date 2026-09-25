@@ -6,6 +6,7 @@ import { initKernel } from "./kernel";
 import { generateMold } from "./generate";
 import { sampleMaster } from "./mesh";
 import { loftMesh, offsetClean, polyArea, type Loop } from "./outline";
+import type { MeshData } from "../types";
 import { profileLabel } from "./layout";
 import { parseSVG } from "./svg";
 
@@ -244,6 +245,29 @@ describe("generate", () => {
       expect(cavity).toBeLessThan(1e-4);
     }
   });
+
+  it("keeps the silhouette of a domed STL that the live Pages bundle turns into a box", async () => {
+    const kernel = await initKernel();
+    const mesh = parseSTL(writeSTL(sculptPlaque(), "placa"));
+    const hit = kernel.projectOutline(mesh);
+    expect(hit.exact).toBe(true);
+    expect(hit.loop.length).toBeGreaterThan(40);
+    expect(offsetClean(hit.loop, 3.5)).toBeNull();
+    expect(Math.abs(polyArea(hit.loop))).toBeLessThan(bboxArea(hit.loop) * 0.75);
+
+    const tray = generateMold(kernel, {
+      mesh,
+      name: "placa.stl",
+      system: "tray",
+      params: { ...defaultParams(), draftDeg: 0, clampEnabled: false, splitEnabled: false },
+      up: "z+",
+      rotDeg: 0,
+    });
+    expect(tray.profileMode).toBe("silhouette");
+    expect(tray.warnings.some((w) => w.toLowerCase().includes("caja envolvente"))).toBe(false);
+    // A rectangular tray of this part is a few dozen triangles. The silhouette shell is not.
+    expect(tray.parts[0].mesh.indices.length / 3).toBeGreaterThan(80);
+  });
 });
 
 /** Five-lobe outline. A 3.5 mm miter offset self-intersects; Clipper must not. */
@@ -256,6 +280,55 @@ function organicLoop(): Loop {
     pts.push([Math.cos(a) * r, Math.sin(a) * r]);
   }
   return pts;
+}
+
+/** Domed plaque with a noisy concave outline, same class as the Pages repro fixture. */
+function sculptPlaque(): MeshData {
+  const nAng = 96;
+  const nRad = 8;
+  const angles: number[] = [];
+  const radii: number[] = [];
+  for (let i = 0; i < nAng; i++) {
+    const a = (i / nAng) * Math.PI * 2;
+    const r = 22 + 8 * Math.sin(5 * a) + 3.2 * Math.sin(13 * a) + 1.1 * Math.sin(23 * a);
+    angles.push(a);
+    radii.push(r);
+  }
+  const positions: number[] = [];
+  const push = (x: number, y: number, z: number) => {
+    positions.push(x, y, z);
+    return positions.length / 3 - 1;
+  };
+  const grid: number[][] = [];
+  for (let ir = 0; ir <= nRad; ir++) {
+    const row: number[] = [];
+    const t = ir / nRad;
+    for (let ia = 0; ia < nAng; ia++) {
+      const dome = Math.sqrt(Math.max(0, 1 - t * t)) * 11;
+      row.push(push(Math.cos(angles[ia]) * radii[ia] * t, Math.sin(angles[ia]) * radii[ia] * t, 1.2 + dome));
+    }
+    grid.push(row);
+  }
+  const indices: number[] = [];
+  const tri = (a: number, b: number, c: number) => indices.push(a, b, c);
+  const center = push(0, 0, 12.2);
+  for (let ia = 0; ia < nAng; ia++) tri(center, grid[1][ia], grid[1][(ia + 1) % nAng]);
+  for (let ir = 1; ir < nRad; ir++) {
+    for (let ia = 0; ia < nAng; ia++) {
+      const ib = (ia + 1) % nAng;
+      tri(grid[ir][ia], grid[ir + 1][ia], grid[ir][ib]);
+      tri(grid[ir][ib], grid[ir + 1][ia], grid[ir + 1][ib]);
+    }
+  }
+  const bottom = angles.map((a, ia) => push(Math.cos(a) * radii[ia], Math.sin(a) * radii[ia], 0));
+  const bc = push(0, 0, 0);
+  for (let ia = 0; ia < nAng; ia++) {
+    const ib = (ia + 1) % nAng;
+    tri(grid[nRad][ia], bottom[ia], grid[nRad][ib]);
+    tri(grid[nRad][ib], bottom[ia], bottom[ib]);
+    tri(bc, bottom[ib], bottom[ia]);
+  }
+  return { positions: Float32Array.from(positions), indices: Uint32Array.from(indices) };
 }
 
 function bboxArea(loop: Loop): number {

@@ -281,21 +281,22 @@ function planOpenBox(
 
   let displaced = 0;
   if (system === "adapted") {
-    const keys = keepInside(placeKeys(innerW, innerD, innerH, floor), cavityBottom);
+    const rawKeys = placeKeys(innerW, innerD, innerH, floor);
+    const keys = keepInside(rawKeys, cavityBottom);
     if (keys.length) {
       unions.push(...keys);
       displaced += keys.length * KEY_SIZE * KEY_SIZE * KEY_HEIGHT;
-    } else warnings.push("La cavidad es pequeña: se omitieron las llaves del fondo.");
+    } else if (rawKeys.length) warnings.push("Las llaves del fondo caen fuera de la silueta; se omitieron.");
+    else warnings.push("La cavidad es pequeña: se omitieron las llaves del fondo.");
 
-    const pins = keepInside(
-      placeFloorPins(innerW, innerD, innerH, floor, params.pinDiameter, params.pinReach),
-      cavityBottom,
-    );
+    const rawPins = placeFloorPins(innerW, innerD, innerH, floor, params.pinDiameter, params.pinReach);
+    const pins = keepInside(rawPins, cavityBottom);
     if (pins.length) {
       unions.push(...pins);
       const r = params.pinDiameter / 2;
       displaced += pins.length * Math.PI * r * r * params.pinReach;
-    } else warnings.push("La cavidad es pequeña: se omitieron los pines de registro.");
+    } else if (rawPins.length) warnings.push("Los pines de registro caen fuera de la silueta; se omitieron.");
+    else warnings.push("La cavidad es pequeña: se omitieron los pines de registro.");
 
     const channelZ = channelCenter(floor, innerH, params.channelH);
     const t = Math.min(1, Math.max(0, (channelZ - floor) / innerH));
