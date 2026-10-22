@@ -362,7 +362,7 @@ export default function App() {
                       <span>Incluir clips</span>
                     </label>
                     <p className="hint">
-                      Con la casilla activa el ZIP incluye los STL del clip, en la cantidad que muestra Summary ({built.clipCount}), y print_notes.txt.
+                      Con la casilla activa el ZIP incluye los STL del clip, en la cantidad que muestra Preview ({built.clipCount}), y print_notes.txt.
                     </p>
                     {ACCESSORY_GROUPS.map((group) => {
                       const downloads = group.files.filter((f) => f.name.toLowerCase().endsWith(".stl"));
