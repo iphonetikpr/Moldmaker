@@ -5,6 +5,7 @@ import { defaultParams } from "./params";
 import { initKernel } from "./kernel";
 import { generateMold } from "./generate";
 import { sampleMaster } from "./mesh";
+import { FLANGE_PROTRUSION, FLANGE_SLOT, FLANGE_SLOT_FROM_OUTER, FLANGE_THICKNESS } from "../constants";
 import { loftMesh, offsetClean, polyArea, type Loop } from "./outline";
 import type { MeshData } from "../types";
 import { profileLabel } from "./layout";
@@ -17,19 +18,14 @@ describe("generate", () => {
     const base = { mesh, name: "ejemplo", params: defaultParams(), up: "z+" as const, rotDeg: 0 };
 
     const adapted = generateMold(kernel, { ...base, system: "adapted" });
-    expect(adapted.parts.map((p) => p.filename)).toEqual([
-      "ejemplo_adapted_box.stl",
-      "ejemplo_adapted_clamps.stl",
-    ]);
+    expect(adapted.parts.map((p) => p.filename)).toEqual(["ejemplo_adapted_box.stl"]);
+    expect(adapted.clipCount).toBe(3);
     expect(adapted.siliconeMm3).toBeGreaterThan(100);
     const box = bboxSize(bboxOf(adapted.parts[0].mesh));
     expect(box[0]).toBeGreaterThan(47);
     expect(box[1]).toBeGreaterThan(36);
     expect(box[2]).toBeGreaterThan(30);
     expect(bboxOf(adapted.parts[0].mesh).min[2]).toBeCloseTo(0, 1);
-    const clamps = bboxSize(bboxOf(adapted.parts[1].mesh));
-    expect(clamps[0]).toBeCloseTo(8, 1);
-    expect(clamps[2]).toBeCloseTo(8, 1);
     const reread = parseSTL(adapted.parts[0].bytes);
     expect(reread.indices.length).toBeGreaterThan(30);
 
@@ -40,6 +36,7 @@ describe("generate", () => {
 
     const two = generateMold(kernel, { ...base, system: "twopart" });
     expect(two.parts.map((p) => p.filename)).toEqual(["ejemplo_2part_bottom.stl", "ejemplo_2part_top.stl"]);
+    expect(two.clipCount).toBe(3);
     const bottom = bboxOf(two.parts[0].mesh);
     const top = bboxOf(two.parts[1].mesh);
     expect(bottom.max[2]).toBeCloseTo(3 + 0.5 + 14 + 5, 0);
@@ -267,6 +264,51 @@ describe("generate", () => {
     expect(tray.warnings.some((w) => w.toLowerCase().includes("caja envolvente"))).toBe(false);
     // A rectangular tray of this part is a few dozen triangles. The silhouette shell is not.
     expect(tray.parts[0].mesh.indices.length / 3).toBeGreaterThan(80);
+  });
+
+  it("cuts an 8.3 mm slot 4 mm in from the tip, aligned on both halves", async () => {
+    const kernel = await initKernel();
+    const mesh = boxMesh([40, 30, 28]);
+    const two = generateMold(kernel, {
+      mesh,
+      name: "caja",
+      system: "twopart",
+      params: { ...defaultParams(), draftDeg: 0 },
+      up: "z+",
+      rotDeg: 0,
+    });
+    expect(two.clipCount).toBe(3);
+    const cut = 3 + 0.5 + 14;
+    const wall = -47 / 2;
+    const lipX = wall - FLANGE_PROTRUSION + FLANGE_SLOT_FROM_OUTER / 2;
+    const slotX = wall - (FLANGE_PROTRUSION - FLANGE_SLOT_FROM_OUTER - FLANGE_SLOT / 2);
+    const pastX = wall - FLANGE_PROTRUSION - 1.2;
+    const probe = (part: number, x: number, z: number) => {
+      const bit = kernel.box([x - 0.25, -0.25, z - 0.25], [0.5, 0.5, 0.5]);
+      return kernel.intersect(kernel.fromMesh(two.parts[part].mesh), bit).volume();
+    };
+    for (const [part, z] of [
+      [0, cut - FLANGE_THICKNESS / 2],
+      [1, cut + FLANGE_THICKNESS / 2],
+    ] as const) {
+      expect(probe(part, lipX, z)).toBeGreaterThan(0.05);
+      expect(probe(part, slotX, z)).toBeLessThan(1e-4);
+      expect(probe(part, pastX, z)).toBeLessThan(1e-4);
+    }
+
+    const large = generateMold(kernel, {
+      mesh: boxMesh([200, 150, 40]),
+      name: "grande",
+      system: "twopart",
+      params: { ...defaultParams(), draftDeg: 0, splitEnabled: false },
+      up: "z+",
+      rotDeg: 0,
+    });
+    expect(large.clipCount).toBe(10);
+    expect(large.parts).toHaveLength(2);
+    const span = bboxSize(bboxOf(large.parts[0].mesh));
+    expect(span[0]).toBeGreaterThan(207 + FLANGE_PROTRUSION);
+    expect(span[1]).toBeGreaterThan(157 + FLANGE_PROTRUSION);
   });
 });
 

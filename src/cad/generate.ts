@@ -85,6 +85,7 @@ export function generateMold(kernel: Kernel, input: GenerateInput): MoldResult {
     warnings: unique(warnings),
     system: input.system,
     profileMode: plan.profileMode,
+    clipCount: plan.clipCount,
   };
 }
 

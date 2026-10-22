@@ -6,6 +6,7 @@ import { publicBase } from "./src/pagesBase";
 export default defineConfig({
   base: publicBase(process.env),
   plugins: [react()],
+  assetsInclude: ["**/*.stl", "**/*.scad"],
   optimizeDeps: {
     exclude: ["manifold-3d"],
   },

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { ACCESSORY_GROUPS, CLIP_PRINT_NOTE, clipPrintNotes, loadClipZipEntries } from "./accessories";
 import { bboxOf, bboxSize, sampleMaster, signedVolume, triangleCount } from "./cad/mesh";
 import { parseOBJ } from "./cad/obj";
 import { parseSVG } from "./cad/svg";
@@ -9,7 +10,7 @@ import { defaultParams, sanitizeParams } from "./cad/params";
 import { parseSTL } from "./cad/stl";
 import type { MeshData, MoldParams, StepId, SystemId, UpAxis } from "./types";
 import { safeName } from "./cad/export";
-import { downloadBytes, downloadZip } from "./ui/download";
+import { downloadBytes, downloadZip, type ZipExtra } from "./ui/download";
 import { NumberField } from "./ui/NumberField";
 import { ThemeToggle } from "./ui/ThemeToggle";
 import { Viewport } from "./ui/Viewport";
@@ -26,17 +27,17 @@ const SYSTEMS: Array<{ id: SystemId; title: string; text: string }> = [
   {
     id: "adapted",
     title: "Adapted Box",
-    text: "Caja que sigue la silueta: holgura, fondo con llaves, embudo y canales, abrazaderas laterales y pines.",
+    text: "Caja que sigue la silueta: holgura, fondo con llaves, embudo y canales, pestañas de cierre y pines.",
   },
   {
     id: "tray",
     title: "Tray",
-    text: "Bandeja abierta que sigue la silueta, fondo plano, una sola cavidad. Abrazadera opcional. Sin segunda mitad.",
+    text: "Bandeja abierta que sigue la silueta, fondo plano, una sola cavidad. Pestañas de cierre opcionales. Sin segunda mitad.",
   },
   {
     id: "twopart",
     title: "2-Part Silicone",
-    text: "Plano de corte en Z (mitad por defecto). Dos mitades que siguen la silueta, pines, embudo en el plano y sello perimetral.",
+    text: "Plano de corte en Z (mitad por defecto). Dos mitades que siguen la silueta, pines, embudo en el plano, sello perimetral y pestañas alineadas.",
   },
 ];
 
@@ -56,6 +57,8 @@ export default function App() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [over, setOver] = useState(false);
   const [ghost, setGhost] = useState(true);
+  const [includeClips, setIncludeClips] = useState(true);
+  const [zipError, setZipError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancel = false;
@@ -120,6 +123,29 @@ export default function App() {
 
   const built = result?.ok ? result.value : null;
   const systemTitle = SYSTEMS.find((s) => s.id === system)?.title ?? system;
+
+  async function saveAsset(name: string, url: string) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`No se pudo descargar ${name}`);
+    downloadBytes(name, await res.arrayBuffer());
+  }
+
+  async function downloadAll() {
+    if (!built) return;
+    setZipError(null);
+    const extras: ZipExtra[] = [];
+    if (includeClips && built.clipCount > 0) {
+      try {
+        const clips = await loadClipZipEntries(built.clipCount);
+        extras.push(...clips);
+      } catch (err) {
+        setZipError(err instanceof Error ? err.message : String(err));
+        return;
+      }
+      extras.push({ path: "print_notes.txt", data: clipPrintNotes(built.clipCount) });
+    }
+    await downloadZip(`${safeName(master?.name || "pieza")}_moldmaker.zip`, built.parts, extras);
+  }
 
   return (
     <div className="app">
@@ -250,13 +276,12 @@ export default function App() {
               <Field label="Pin Ø" k="pd" v={params.pinDiameter} step={0.05} min={0.6} max={12} set={(n) => setParam("pinDiameter", n)} />
               <Field label="Agujero Ø" k="hd" v={params.holeDiameter} step={0.05} min={0.8} max={14} set={(n) => setParam("holeDiameter", n)} />
               <Field label="Alcance del pin" k="pr" v={params.pinReach} step={0.5} min={1} max={20} set={(n) => setParam("pinReach", n)} />
-              <Field label="Ranura abrazadera" k="cs" v={params.clampSlot} step={0.5} min={3} max={30} set={(n) => setParam("clampSlot", n)} />
               <Field label="Holgura abrazadera" k="cc" v={params.clampClearance} step={0.05} min={0} max={2} set={(n) => setParam("clampClearance", n)} />
               <Field label="Contracción %" k="sh" v={params.castShrinkPct} step={0.1} min={0} max={15} set={(n) => setParam("castShrinkPct", n)} />
               <Field label="Corte Z (0–1)" k="cut" v={params.cutRatio} step={0.05} min={0.2} max={0.8} set={(n) => setParam("cutRatio", n)} />
               <label className="chk">
                 <input type="checkbox" checked={params.clampEnabled} onChange={(e) => setParam("clampEnabled", e.target.checked)} />
-                <span>Abrazadera en Tray</span>
+                <span>Pestañas de cierre (clips)</span>
               </label>
               <label className="chk">
                 <input type="checkbox" checked={params.splitEnabled} onChange={(e) => setParam("splitEnabled", e.target.checked)} />
@@ -268,7 +293,7 @@ export default function App() {
                 Restaurar valores
               </button>
               <p className="hint">
-                Valores de partida: pared 3 mm, salida 1.5°, holgura 0.5 mm, embudo Ø12, canal 4×4, pin Ø3 / agujero Ø3.25 / alcance 5, división 250 mm con solape 2.5, ranura 8 / holgura 0.3, contracción 0.
+                Valores de partida: pared 3 mm, salida 1.5°, holgura 0.5 mm, embudo Ø12, canal 4×4, pin Ø3 / agujero Ø3.25 / alcance 5, división 250 mm con solape 2.5, pestaña 5 mm por mitad (vuelo 16.3, ranura 8.3), holgura de sello 0.3, contracción 0.
               </p>
             </section>
           )}
@@ -277,7 +302,7 @@ export default function App() {
             <section className="card">
               <h2>Preview</h2>
               <p className="hint">
-                Verde: maestro. Gris: molde. Ámbar: abrazaderas. Arrastra para orbitar, rueda para zoom, botón derecho para desplazar.
+                Verde: maestro. Gris: molde, con las pestañas de cierre. Arrastra para orbitar, rueda para zoom, botón derecho para desplazar.
               </p>
               <label className="chk">
                 <input type="checkbox" checked={ghost} onChange={(e) => setGhost(e.target.checked)} />
@@ -296,6 +321,10 @@ export default function App() {
                   <div>
                     <span>Maestro dentro</span>
                     <b>Z +{built.masterLift.toFixed(2)} mm</b>
+                  </div>
+                  <div>
+                    <span>Clips</span>
+                    <b>{built.clipCount}</b>
                   </div>
                 </div>
               )}
@@ -316,16 +345,47 @@ export default function App() {
                         </span>
                       </button>
                     ))}
-                    <button
-                      type="button"
-                      className="primary zip"
-                      onClick={() => void downloadZip(`${safeName(master?.name || "pieza")}_moldmaker.zip`, built.parts)}
-                    >
+                    <button type="button" className="primary zip" onClick={() => void downloadAll()}>
                       <b>Descargar todo (.zip)</b>
-                      <span>STL binarios, milímetros</span>
+                      <span>
+                        STL binarios, milímetros
+                        {includeClips && built.clipCount > 0 ? ` · ${built.clipCount} clips` : ""}
+                      </span>
                     </button>
                   </div>
                   <p className="hint">Los STL salen en milímetros, listos para el laminador. La división opcional añade espigas Ø pin y agujeros Ø agujero con solape de encaje.</p>
+                  {zipError && <p className="warnbar">{zipError}</p>}
+                  <div className="acc">
+                    <h3>Accesorios</h3>
+                    <label className="chk">
+                      <input type="checkbox" checked={includeClips} onChange={(e) => setIncludeClips(e.target.checked)} />
+                      <span>Incluir clips</span>
+                    </label>
+                    <p className="hint">
+                      Con la casilla activa el ZIP incluye los STL del clip, en la cantidad que muestra Preview ({built.clipCount}), y print_notes.txt.
+                    </p>
+                    {ACCESSORY_GROUPS.map((group) => {
+                      const downloads = group.files.filter((f) => f.name.toLowerCase().endsWith(".stl"));
+                      return (
+                        <article key={group.id} className="acc-card">
+                          {group.thumbnail && <img className="acc-thumb" src={group.thumbnail} alt="" />}
+                          <div className="acc-body">
+                            <b>{group.title}</b>
+                            <p className="acc-note">{CLIP_PRINT_NOTE}</p>
+                            {downloads.length > 0 && (
+                              <div className="acc-dls">
+                                {downloads.map((file) => (
+                                  <button key={file.path} type="button" onClick={() => void saveAsset(file.name, file.url).catch((err: unknown) => setZipError(err instanceof Error ? err.message : String(err)))}>
+                                    {file.name}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
                 </>
               ) : (
                 <p className="hint">Importa una pieza para exportar.</p>
