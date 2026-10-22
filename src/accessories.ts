@@ -68,8 +68,9 @@ export function matchesPrensa(name: string, size: "80" | "150"): boolean {
   return /^cclamp_(knob|pad)\./.test(n);
 }
 
+/** Frame, wedge, and the flange-clip drawings. The old `clip8_*` names do not match. */
 export function matchesClip(name: string): boolean {
-  return /clip_flange_(frame|wedge)\./i.test(name);
+  return /clip_flange_/i.test(name);
 }
 
 function groupOf(title: string, id: string, files: AccessoryFile[]): AccessoryGroup {
