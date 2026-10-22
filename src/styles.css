@@ -499,6 +499,74 @@ select {
   color: rgba(6, 32, 22, 0.72);
 }
 
+.acc {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.acc h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.acc-card {
+  display: flex;
+  gap: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 10px;
+}
+
+.acc-thumb {
+  width: 72px;
+  height: 72px;
+  flex: 0 0 auto;
+  object-fit: contain;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
+.acc-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.acc-body b {
+  font-size: 13px;
+}
+
+.acc-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.acc-dls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.acc-dls button {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.acc-dls button:hover {
+  border-color: var(--accent);
+}
+
 @media (max-width: 960px) {
   .shell {
     grid-template-columns: 1fr;

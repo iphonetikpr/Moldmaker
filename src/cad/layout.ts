@@ -1,4 +1,15 @@
-import { KEY_HEIGHT, KEY_INSET, KEY_SIZE, SEAL_H, SEAL_W } from "../constants";
+import {
+  FLANGE_PITCH,
+  FLANGE_PROTRUSION,
+  FLANGE_SLOT,
+  FLANGE_SLOT_FROM_OUTER,
+  FLANGE_THICKNESS,
+  KEY_HEIGHT,
+  KEY_INSET,
+  KEY_SIZE,
+  SEAL_H,
+  SEAL_W,
+} from "../constants";
 import type { MoldParams, SystemId, Vec3 } from "../types";
 import {
   isAxisAlignedRect,
@@ -85,7 +96,7 @@ export interface MoldMetrics {
   channelW: number;
   channelH: number;
   clampSlot: number;
-  /** Slot opening. Larger than the clamp by clampClearance. */
+  /** Through-slot opening in the flange (mm). Fixed by the wedge clip. */
   slotWidth: number;
   cutZ: number;
   masterVolume: number;
@@ -122,6 +133,19 @@ export interface MoldPlan {
   metrics: MoldMetrics;
   solids: SolidSpec[];
   profileMode: ProfileMode;
+  /** One printed wedge clip per station. A 2-part station is a top/bottom pair. */
+  clipCount: number;
+  flanges: FlangeStation[];
+}
+
+export type FlangeSide = "x+" | "x-" | "y+" | "y-";
+
+export interface FlangeStation {
+  side: FlangeSide;
+  /** Coordinate along the wall: Y on ±X sides, X on ±Y sides. */
+  along: number;
+  /** Outer face of the shell at `along`. */
+  wall: number;
 }
 
 export function frustumVolume(hx0: number, hy0: number, hx1: number, hy1: number, h: number): number {
@@ -306,16 +330,18 @@ function planOpenBox(
     subtracts.push(cup.channel, cup.inner);
   }
 
-  const slotWidth = params.clampSlot + params.clampClearance;
-  const wantClamp = system === "adapted" || params.clampEnabled;
-  const clamps: Feat[] = [];
-  if (wantClamp) {
-    const slots = placeSlots(outerW, outerD, outerH, wall, slotWidth);
-    if (slots.length) {
-      subtracts.push(...slots);
-      clamps.push(...placeClampPads(params.clampSlot));
-    } else warnings.push("La pared es demasiado fina para las ranuras de abrazadera.");
-  }
+  const flange = params.clampEnabled
+    ? placeFlanges(
+        outer,
+        outerH,
+        0,
+        system === "adapted" ? pourKeepouts(outer, wall, params) : [],
+        warnings,
+        "single",
+      )
+    : { unions: [] as Feat[], slots: [] as Feat[], stations: [] as FlangeStation[] };
+  unions.push(...flange.unions);
+  subtracts.push(...flange.slots);
 
   const funnelVol =
     system === "adapted"
@@ -335,16 +361,6 @@ function planOpenBox(
       subtracts,
     },
   ];
-  if (clamps.length) {
-    solids.push({
-      id: system === "adapted" ? "adapted_clamps" : "tray_clamp",
-      role: "clamp",
-      split: false,
-      unions: clamps,
-      carve: [],
-      subtracts: [],
-    });
-  }
 
   return {
     system,
@@ -367,13 +383,15 @@ function planOpenBox(
       channelW: params.channelW,
       channelH: params.channelH,
       clampSlot: params.clampSlot,
-      slotWidth,
+      slotWidth: FLANGE_SLOT,
       cutZ: 0,
       masterVolume,
       siliconeMm3,
     },
     solids,
     profileMode: profile.profileMode,
+    clipCount: flange.stations.length,
+    flanges: flange.stations,
   };
 }
 
@@ -450,25 +468,219 @@ function placeSideFunnel(
   };
 }
 
-function placeSlots(outerW: number, outerD: number, outerH: number, wall: number, slotWidth: number): Feat[] {
-  const depth = Math.min(wall * 0.55, wall - 0.9);
-  if (depth < 0.45 || outerH < slotWidth + 2 || outerW < slotWidth + 2) return [];
-  const z = Math.min(outerH * 0.62, outerH - slotWidth / 2 - 1);
-  const z0 = z - slotWidth / 2;
-  const half = outerD / 2;
-  return [
-    box([-slotWidth / 2, half - depth, z0], [slotWidth, depth + 0.04, slotWidth]),
-    box([-slotWidth / 2, -half - 0.04, z0], [slotWidth, depth + 0.04, slotWidth]),
-  ];
+/** Tangential width of the tab: 4 mm of material on each side of the 8.3 mm slot. */
+function flangeWidth(): number {
+  return FLANGE_SLOT + 2 * FLANGE_SLOT_FROM_OUTER;
 }
 
-function placeClampPads(slot: number): Feat[] {
-  const depth = 4;
-  const gap = 6;
-  return [
-    box([0, 0, 0], [slot, depth, slot]),
-    box([0, depth + gap, 0], [slot, depth, slot]),
+function pourKeepouts(outer: Loop, wall: number, params: MoldParams): Array<{ x: number; y: number; r: number }> {
+  const anchor = rightAnchor(outer);
+  const outerR = params.funnelDiameter / 2 + wall;
+  return [{ x: anchor.x + outerR - 0.6, y: anchor.y, r: outerR + 0.8 }];
+}
+
+function crossCoord(loop: Loop, alongY: boolean, at: number): number[] {
+  const hits: number[] = [];
+  const n = loop.length;
+  for (let i = 0; i < n; i++) {
+    const a = loop[i];
+    const b = loop[(i + 1) % n];
+    const aAlong = alongY ? a[1] : a[0];
+    const bAlong = alongY ? b[1] : b[0];
+    const aCross = alongY ? a[0] : a[1];
+    const bCross = alongY ? b[0] : b[1];
+    if (Math.abs(aAlong - bAlong) < 1e-9) {
+      if (Math.abs(at - aAlong) <= 1e-4) hits.push(aCross, bCross);
+      continue;
+    }
+    const t = (at - aAlong) / (bAlong - aAlong);
+    if (t < -1e-6 || t > 1 + 1e-6) continue;
+    hits.push(aCross + t * (bCross - aCross));
+  }
+  return hits;
+}
+
+function spreadAlong(min: number, max: number, blocked: (at: number) => boolean): number[] {
+  const length = max - min;
+  const n = Math.max(1, Math.ceil(length / FLANGE_PITCH));
+  const half = flangeWidth() / 2;
+  const edge = half + FLANGE_SLOT_FROM_OUTER;
+  const lo = min + edge;
+  const hi = max - edge;
+  const room = hi >= lo;
+  const ideal = room
+    ? Array.from({ length: n }, (_, i) => min + ((i + 1) / (n + 1)) * length)
+    : length >= flangeWidth()
+      ? [(min + max) / 2]
+      : [];
+  const placed: number[] = [];
+  const limit = (at: number) => (room ? Math.min(hi, Math.max(lo, at)) : at);
+  const free = (at: number) =>
+    !blocked(at) && placed.every((p) => Math.abs(p - at) >= flangeWidth() + 1);
+  for (const target of ideal) {
+    const start = limit(target);
+    if (free(start)) {
+      placed.push(start);
+      continue;
+    }
+    let found: number | null = null;
+    const span = Math.ceil(length);
+    for (let step = 1; step <= span && found == null; step++) {
+      for (const sign of [1, -1] as const) {
+        const at = limit(target + sign * step);
+        if (Math.abs(at - target) > step + 1e-6) continue;
+        if (free(at)) {
+          found = at;
+          break;
+        }
+      }
+    }
+    if (found != null) placed.push(found);
+  }
+  return placed;
+}
+
+function rectHitsCircle(
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+  cx: number,
+  cy: number,
+  r: number,
+): boolean {
+  const x = Math.max(minX, Math.min(cx, maxX));
+  const y = Math.max(minY, Math.min(cy, maxY));
+  return (x - cx) ** 2 + (y - cy) ** 2 <= r * r;
+}
+
+/** Stations around the outer shell. The pour cup is kept clear. */
+export function planFlangeStations(
+  outer: Loop,
+  avoid: Array<{ x: number; y: number; r: number }>,
+): FlangeStation[] {
+  const bounds = loopBounds(outer);
+  const half = flangeWidth() / 2;
+  const sides: Array<{ side: FlangeSide; min: number; max: number; face: number }> = [
+    { side: "x+", min: bounds.minY, max: bounds.maxY, face: bounds.maxX },
+    { side: "x-", min: bounds.minY, max: bounds.maxY, face: bounds.minX },
+    { side: "y+", min: bounds.minX, max: bounds.maxX, face: bounds.maxY },
+    { side: "y-", min: bounds.minX, max: bounds.maxX, face: bounds.minY },
   ];
+  const stations: FlangeStation[] = [];
+  for (const side of sides) {
+    const alongY = side.side === "x+" || side.side === "x-";
+    const wantMax = side.side === "x+" || side.side === "y+";
+    const spots = spreadAlong(side.min, side.max, (at) => {
+      const hits = crossCoord(outer, alongY, at);
+      if (!hits.length) return true;
+      const wall = wantMax ? Math.max(...hits) : Math.min(...hits);
+      if (Math.abs(wall - side.face) > 1.5) return true;
+      const sign = side.side === "x+" || side.side === "y+" ? 1 : -1;
+      let minX: number;
+      let maxX: number;
+      let minY: number;
+      let maxY: number;
+      if (alongY) {
+        const x0 = wall;
+        const x1 = wall + sign * FLANGE_PROTRUSION;
+        minX = Math.min(x0, x1);
+        maxX = Math.max(x0, x1);
+        minY = at - half;
+        maxY = at + half;
+      } else {
+        const y0 = wall;
+        const y1 = wall + sign * FLANGE_PROTRUSION;
+        minY = Math.min(y0, y1);
+        maxY = Math.max(y0, y1);
+        minX = at - half;
+        maxX = at + half;
+      }
+      return avoid.some((c) => rectHitsCircle(minX, minY, maxX, maxY, c.x, c.y, c.r));
+    });
+    for (const along of spots) {
+      const hits = crossCoord(outer, alongY, along);
+      if (!hits.length) continue;
+      const wall = wantMax ? Math.max(...hits) : Math.min(...hits);
+      if (Math.abs(wall - side.face) > 1.5) continue;
+      stations.push({ side: side.side, along, wall });
+    }
+  }
+  return stations;
+}
+
+function flangePair(station: FlangeStation, z0: number, z1: number): { body: Feat; slot: Feat } {
+  const width = flangeWidth();
+  const bite = 0.4;
+  const slotInner = FLANGE_PROTRUSION - FLANGE_SLOT_FROM_OUTER - FLANGE_SLOT;
+  const slotOuter = FLANGE_PROTRUSION - FLANGE_SLOT_FROM_OUTER;
+  const sign = station.side === "x+" || station.side === "y+" ? 1 : -1;
+  const bleed = 0.15;
+  if (station.side === "x+" || station.side === "x-") {
+    const xBite = station.wall - sign * bite;
+    const xTip = station.wall + sign * FLANGE_PROTRUSION;
+    const y0 = station.along - width / 2;
+    const body = box([Math.min(xBite, xTip), y0, z0], [Math.abs(xTip - xBite), width, z1 - z0]);
+    const s0 = station.wall + sign * slotInner;
+    const s1 = station.wall + sign * slotOuter;
+    const slot = box(
+      [Math.min(s0, s1), station.along - FLANGE_SLOT / 2, z0 - bleed],
+      [Math.abs(s1 - s0), FLANGE_SLOT, z1 - z0 + bleed * 2],
+    );
+    return { body, slot };
+  }
+  const yBite = station.wall - sign * bite;
+  const yTip = station.wall + sign * FLANGE_PROTRUSION;
+  const x0 = station.along - width / 2;
+  const body = box([x0, Math.min(yBite, yTip), z0], [width, Math.abs(yTip - yBite), z1 - z0]);
+  const s0 = station.wall + sign * slotInner;
+  const s1 = station.wall + sign * slotOuter;
+  const slot = box(
+    [station.along - FLANGE_SLOT / 2, Math.min(s0, s1), z0 - bleed],
+    [FLANGE_SLOT, Math.abs(s1 - s0), z1 - z0 + bleed * 2],
+  );
+  return { body, slot };
+}
+
+function placeFlanges(
+  outer: Loop,
+  outerH: number,
+  cutZ: number,
+  avoid: Array<{ x: number; y: number; r: number }>,
+  warnings: string[],
+  kind: "single" | "pair",
+): { unions: Feat[]; slots: Feat[]; stations: FlangeStation[] } {
+  const stations = planFlangeStations(outer, avoid);
+  if (!stations.length) {
+    warnings.push("No cupo ninguna pestaña de cierre junto al borde.");
+    return { unions: [], slots: [], stations: [] };
+  }
+  const ranges: Array<[number, number]> = [];
+  if (kind === "single") {
+    const thick = FLANGE_THICKNESS * 2;
+    if (outerH < thick + 0.4) {
+      warnings.push("La pared es baja para la pestaña de 10 mm que agarra el clip.");
+      return { unions: [], slots: [], stations: [] };
+    }
+    const z0 = (outerH - thick) / 2;
+    ranges.push([z0, z0 + thick]);
+  } else {
+    if (cutZ < FLANGE_THICKNESS + 0.2 || outerH - cutZ < FLANGE_THICKNESS + 0.2) {
+      warnings.push("El plano de corte no deja 5 mm de pestaña en cada mitad.");
+      return { unions: [], slots: [], stations: [] };
+    }
+    ranges.push([cutZ - FLANGE_THICKNESS, cutZ], [cutZ, cutZ + FLANGE_THICKNESS]);
+  }
+  const unions: Feat[] = [];
+  const slots: Feat[] = [];
+  for (const station of stations) {
+    for (const [z0, z1] of ranges) {
+      const pair = flangePair(station, z0, z1);
+      unions.push(pair.body);
+      slots.push(pair.slot);
+    }
+  }
+  return { unions, slots, stations };
 }
 
 function planTwoPart(
@@ -569,6 +781,9 @@ function planTwoPart(
   );
 
   const cup = placePartingFunnel(outer, cavCut, wall, cutZ, params);
+  const flange = params.clampEnabled
+    ? placeFlanges(outer, outerH, cutZ, pourKeepouts(outer, wall, params), warnings, "pair")
+    : { unions: [] as Feat[], slots: [] as Feat[], stations: [] as FlangeStation[] };
 
   const tBottom = innerH > 1e-9 ? (cutZ + 0.08 - cavZ0) / innerH : 0;
   const tTop = innerH > 1e-9 ? (cutZ - 0.08 - cavZ0) / innerH : 0;
@@ -581,17 +796,18 @@ function planTwoPart(
     id: "2part_bottom",
     role: "mold",
     split: true,
-    unions: [poly(outer, outer, 0, cutZ), ...tongues, ...pins, cup.outerBottom],
+    // placeFlanges emits [bottom, top] per station, so even entries belong to this half.
+    unions: [poly(outer, outer, 0, cutZ), ...tongues, ...pins, cup.outerBottom, ...flange.unions.filter((_, i) => i % 2 === 0)],
     carve: [bottomCarve],
-    subtracts: [cup.channel, cup.innerBottom],
+    subtracts: [cup.channel, cup.innerBottom, ...flange.slots.filter((_, i) => i % 2 === 0)],
   };
   const top: SolidSpec = {
     id: "2part_top",
     role: "mold",
     split: true,
-    unions: [poly(outer, outer, cutZ, outerH), ...bosses, cup.outerTop],
+    unions: [poly(outer, outer, cutZ, outerH), ...bosses, cup.outerTop, ...flange.unions.filter((_, i) => i % 2 === 1)],
     carve: [topCarve],
-    subtracts: [...grooves, ...holes, cup.channel, cup.innerTop],
+    subtracts: [...grooves, ...holes, cup.channel, cup.innerTop, ...flange.slots.filter((_, i) => i % 2 === 1)],
   };
 
   const cav = loftVolume(cavityBottom, designTop, innerH);
@@ -621,13 +837,15 @@ function planTwoPart(
       channelW: params.channelW,
       channelH: params.channelH,
       clampSlot: params.clampSlot,
-      slotWidth: params.clampSlot + params.clampClearance,
+      slotWidth: FLANGE_SLOT,
       cutZ,
       masterVolume,
       siliconeMm3,
     },
     solids: [bottom, top],
     profileMode: profile.profileMode,
+    clipCount: flange.stations.length,
+    flanges: flange.stations,
   };
 }
 

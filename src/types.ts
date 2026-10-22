@@ -64,4 +64,6 @@ export interface MoldResult {
   system: SystemId;
   /** Whether the cavity followed the part outline or the bounding box. */
   profileMode: "silhouette" | "rect" | "bbox";
+  /** Wedge clips to print. One clip closes one pair of aligned flanges. */
+  clipCount: number;
 }

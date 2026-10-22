@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULTS } from "../constants";
+import { DEFAULTS, FLANGE_PROTRUSION, FLANGE_SLOT, FLANGE_SLOT_FROM_OUTER, FLANGE_THICKNESS } from "../constants";
 import type { MoldParams, Vec3 } from "../types";
-import { frustumVolume, planMold, profileLabel } from "./layout";
+import { frustumVolume, planMold, profileLabel, type Feat } from "./layout";
 import { isAxisAlignedRect, isConcave, offsetClean, pointInPoly, polyArea, loopBounds, type Loop } from "./outline";
 import { defaultParams, sanitizeParams } from "./params";
 import { planSplits } from "./split";
@@ -54,7 +54,8 @@ describe("layout", () => {
     expect(m.pinDiameter).toBe(3);
     expect(m.pinReach).toBe(5);
     expect(m.funnelDiameter).toBe(12);
-    expect(plan.solids.map((s) => s.id)).toEqual(["adapted_box", "adapted_clamps"]);
+    expect(plan.solids.map((s) => s.id)).toEqual(["adapted_box"]);
+    expect(plan.clipCount).toBe(3);
     expect(plan.masterLift).toBe(3);
     const cav = frustumVolume(m.innerW / 2, m.innerD / 2, m.innerW / 2, m.innerD / 2, m.innerH);
     expect(m.siliconeMm3).toBeGreaterThan(0);
@@ -114,6 +115,21 @@ describe("layout", () => {
     expect(plan.solids[0].id).toBe("tray");
     expect(plan.solids[0].unions).toHaveLength(1);
     expect(plan.solids[0].subtracts).toHaveLength(0);
+    expect(plan.clipCount).toBe(0);
+  });
+
+  it("gives a tray a 10 mm tab on every side when the pour cup is absent", () => {
+    const plan = planMold("tray", part, 24000, params({ draftDeg: 0, clampEnabled: true }));
+    expect(plan.clipCount).toBe(4);
+    expect(plan.flanges.map((f) => f.side).sort()).toEqual(["x+", "x-", "y+", "y-"]);
+    const bodies = plan.solids[0].unions.filter((f) => f.kind === "box");
+    expect(bodies).toHaveLength(4);
+    const z0 = (plan.metrics.outerH - FLANGE_THICKNESS * 2) / 2;
+    for (const body of bodies) {
+      if (body.kind !== "box") continue;
+      expect(body.min[2]).toBeCloseTo(z0);
+      expect(body.size[2]).toBeCloseTo(FLANGE_THICKNESS * 2);
+    }
   });
 
   it("splits a 2-part mold at Z mid with pins and a wider hole", () => {
@@ -127,8 +143,83 @@ describe("layout", () => {
     expect(pins.length).toBe(4);
     expect(holes.length).toBe(4);
     expect(pins[0].kind === "cyl" && pins[0].height).toBeCloseTo(5.3);
+    expect(plan.clipCount).toBe(3);
+  });
+
+  it("stacks 5 mm flanges on a small 2-part box and keeps the pour side clear", () => {
+    const plan = planMold("twopart", part, 24000, params({ draftDeg: 0 }));
+    expect(plan.metrics.outerW).toBeCloseTo(47);
+    expect(plan.metrics.outerD).toBeCloseTo(37);
+    expect(plan.clipCount).toBe(3);
+    expect(plan.flanges.map((f) => f.side).sort()).toEqual(["x-", "y+", "y-"]);
+    const cut = plan.metrics.cutZ;
+    const bottom = boxes(plan.solids[0].unions);
+    const top = boxes(plan.solids[1].unions);
+    expect(bottom).toHaveLength(3);
+    expect(top).toHaveLength(3);
+    for (let i = 0; i < bottom.length; i++) {
+      expect(bottom[i].min[2]).toBeCloseTo(cut - FLANGE_THICKNESS);
+      expect(bottom[i].size[2]).toBeCloseTo(FLANGE_THICKNESS);
+      expect(top[i].min[2]).toBeCloseTo(cut);
+      expect(top[i].size[2]).toBeCloseTo(FLANGE_THICKNESS);
+      expect(top[i].min[0]).toBeCloseTo(bottom[i].min[0]);
+      expect(top[i].min[1]).toBeCloseTo(bottom[i].min[1]);
+      expect(top[i].size[0]).toBeCloseTo(bottom[i].size[0]);
+      expect(top[i].size[1]).toBeCloseTo(bottom[i].size[1]);
+    }
+    const station = plan.flanges.find((f) => f.side === "x-");
+    expect(station).toBeTruthy();
+    if (!station) return;
+    expect(station.wall).toBeCloseTo(-plan.metrics.outerW / 2);
+    expect(station.along).toBeCloseTo(0);
+    const body = bottom.find((b) => b.min[0] < station.wall);
+    expect(body).toBeTruthy();
+    if (!body) return;
+    expect(body.min[0]).toBeCloseTo(station.wall - FLANGE_PROTRUSION);
+    expect(body.size[0]).toBeCloseTo(FLANGE_PROTRUSION + 0.4);
+    const slotOuter = FLANGE_PROTRUSION - FLANGE_SLOT_FROM_OUTER;
+    const slot = boxes(plan.solids[0].subtracts).find((b) => b.min[0] < station.wall && Math.abs(b.size[0] - FLANGE_SLOT) < 1e-6);
+    expect(slot).toBeTruthy();
+    if (!slot) return;
+    expect(slot.min[0]).toBeCloseTo(station.wall - slotOuter);
+    expect(slot.size[0]).toBeCloseTo(FLANGE_SLOT);
+    expect(station.wall - FLANGE_PROTRUSION - slot.min[0]).toBeCloseTo(-FLANGE_SLOT_FROM_OUTER);
+    const topSlot = boxes(plan.solids[1].subtracts).find((b) => Math.abs(b.min[0] - slot.min[0]) < 1e-6 && Math.abs(b.min[1] - slot.min[1]) < 1e-6);
+    expect(topSlot?.min[2]).toBeCloseTo(cut - 0.15);
+  });
+
+  it("spaces a large 2-part box at ceil(side / 80), two on X and three on Y", () => {
+    const plan = planMold("twopart", [200, 150, 40], 200 * 150 * 40, params({ draftDeg: 0 }));
+    expect(plan.metrics.outerW).toBeCloseTo(207);
+    expect(plan.metrics.outerD).toBeCloseTo(157);
+    expect(plan.clipCount).toBe(10);
+    const along = (side: string) =>
+      plan.flanges
+        .filter((f) => f.side === side)
+        .map((f) => f.along)
+        .sort((a, b) => a - b);
+    expect(along("x+").map((n) => n.toFixed(2))).toEqual(["-26.17", "26.17"]);
+    expect(along("x-").map((n) => n.toFixed(2))).toEqual(["-26.17", "26.17"]);
+    expect(along("y+").map((n) => n.toFixed(2))).toEqual(["-51.75", "0.00", "51.75"]);
+    expect(along("y-").map((n) => n.toFixed(2))).toEqual(["-51.75", "0.00", "51.75"]);
+    const cut = plan.metrics.cutZ;
+    expect(boxes(plan.solids[0].unions)).toHaveLength(10);
+    expect(boxes(plan.solids[1].unions).every((b) => Math.abs(b.min[2] - cut) < 1e-6)).toBe(true);
+  });
+
+  it("omits flanges when the toggle is off or a half is shorter than 5 mm", () => {
+    const off = planMold("twopart", part, 24000, params({ draftDeg: 0, clampEnabled: false }));
+    expect(off.clipCount).toBe(0);
+    expect(boxes(off.solids[0].unions)).toHaveLength(0);
+    const short = planMold("twopart", [40, 30, 8], 8000, params({ draftDeg: 0, cutRatio: 0.2 }));
+    expect(short.clipCount).toBe(0);
+    expect(short.warnings.some((w) => w.includes("5 mm"))).toBe(true);
   });
 });
+
+function boxes(feats: Feat[]): Array<Extract<Feat, { kind: "box" }>> {
+  return feats.filter((f): f is Extract<Feat, { kind: "box" }> => f.kind === "box");
+}
 
 function organicLoop(): Loop {
   const pts: Loop = [];
