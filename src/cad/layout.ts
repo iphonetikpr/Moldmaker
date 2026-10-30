@@ -1,4 +1,8 @@
 import {
+  BINDER_GROOVE_D,
+  BINDER_GROOVE_FROM_WALL,
+  BINDER_GROOVE_W,
+  BINDER_ROOT_CHAMFER,
   FLANGE_PITCH,
   FLANGE_PROTRUSION,
   FLANGE_SLOT,
@@ -9,7 +13,10 @@ import {
   KEY_SIZE,
   SEAL_H,
   SEAL_W,
+  binderSizeById,
+  type BinderSize,
 } from "../constants";
+import { closureOf } from "./params";
 import type { MoldParams, SystemId, Vec3 } from "../types";
 import {
   isAxisAlignedRect,
@@ -61,11 +68,16 @@ export interface PolyFeat {
   holeTop?: Loop;
 }
 
+export interface HullFeat {
+  pts: Vec3[];
+}
+
 export type Feat =
   | ({ kind: "box" } & BoxFeat)
   | ({ kind: "cyl" } & CylFeat)
   | ({ kind: "frustum" } & FrustumFeat)
-  | ({ kind: "poly" } & PolyFeat);
+  | ({ kind: "poly" } & PolyFeat)
+  | ({ kind: "hull" } & HullFeat);
 
 export interface SolidSpec {
   id: string;
@@ -330,16 +342,19 @@ function planOpenBox(
     subtracts.push(cup.channel, cup.inner);
   }
 
-  const flange = params.clampEnabled
-    ? placeFlanges(
-        outer,
-        outerH,
-        0,
-        system === "adapted" ? pourKeepouts(outer, wall, params) : [],
-        warnings,
-        "single",
-      )
-    : { unions: [] as Feat[], slots: [] as Feat[], stations: [] as FlangeStation[] };
+  const closure = closureOf(params);
+  const flange =
+    closure === "none"
+      ? emptyFlange()
+      : placeFlanges(
+          outer,
+          outerH,
+          0,
+          system === "adapted" ? pourKeepouts(outer, wall, params) : [],
+          warnings,
+          "single",
+          closure === "binder" ? binderSizeById(params.binderSize) : null,
+        );
   unions.push(...flange.unions);
   subtracts.push(...flange.slots);
 
@@ -468,9 +483,45 @@ function placeSideFunnel(
   };
 }
 
-/** Tangential width of the tab: 4 mm of material on each side of the 8.3 mm slot. */
+/** Tangential width of the printed-clip tab: 4 mm of material on each side of the 8.3 mm slot. */
 function flangeWidth(): number {
   return FLANGE_SLOT + 2 * FLANGE_SLOT_FROM_OUTER;
+}
+
+interface TabProfile {
+  width: number;
+  protrusion: number;
+  /** Per half. A one-piece shell stacks two of these into one tab. */
+  thickness: number;
+  slotted: boolean;
+}
+
+function clipProfile(): TabProfile {
+  return { width: flangeWidth(), protrusion: FLANGE_PROTRUSION, thickness: FLANGE_THICKNESS, slotted: true };
+}
+
+function binderProfile(row: BinderSize): TabProfile {
+  return { width: row.width, protrusion: row.protrusion, thickness: row.thickness, slotted: false };
+}
+
+interface FlangeBuild {
+  unions: Feat[];
+  slots: Feat[];
+  stations: FlangeStation[];
+  /** Index 0 is the lower tab, index 1 the upper tab. A one-piece shell uses only index 0. */
+  halves: Array<{ unions: Feat[]; slots: Feat[] }>;
+}
+
+function emptyFlange(): FlangeBuild {
+  return {
+    unions: [],
+    slots: [],
+    stations: [],
+    halves: [
+      { unions: [], slots: [] },
+      { unions: [], slots: [] },
+    ],
+  };
 }
 
 function pourKeepouts(outer: Loop, wall: number, params: MoldParams): Array<{ x: number; y: number; r: number }> {
@@ -500,23 +551,23 @@ function crossCoord(loop: Loop, alongY: boolean, at: number): number[] {
   return hits;
 }
 
-function spreadAlong(min: number, max: number, blocked: (at: number) => boolean): number[] {
+function spreadAlong(min: number, max: number, tabWidth: number, blocked: (at: number) => boolean): number[] {
   const length = max - min;
   const n = Math.max(1, Math.ceil(length / FLANGE_PITCH));
-  const half = flangeWidth() / 2;
+  const half = tabWidth / 2;
   const edge = half + FLANGE_SLOT_FROM_OUTER;
   const lo = min + edge;
   const hi = max - edge;
   const room = hi >= lo;
   const ideal = room
     ? Array.from({ length: n }, (_, i) => min + ((i + 1) / (n + 1)) * length)
-    : length >= flangeWidth()
+    : length >= tabWidth
       ? [(min + max) / 2]
       : [];
   const placed: number[] = [];
   const limit = (at: number) => (room ? Math.min(hi, Math.max(lo, at)) : at);
   const free = (at: number) =>
-    !blocked(at) && placed.every((p) => Math.abs(p - at) >= flangeWidth() + 1);
+    !blocked(at) && placed.every((p) => Math.abs(p - at) >= tabWidth + 1);
   for (const target of ideal) {
     const start = limit(target);
     if (free(start)) {
@@ -558,9 +609,11 @@ function rectHitsCircle(
 export function planFlangeStations(
   outer: Loop,
   avoid: Array<{ x: number; y: number; r: number }>,
+  tabWidth = flangeWidth(),
+  protrusion = FLANGE_PROTRUSION,
 ): FlangeStation[] {
   const bounds = loopBounds(outer);
-  const half = flangeWidth() / 2;
+  const half = tabWidth / 2;
   const sides: Array<{ side: FlangeSide; min: number; max: number; face: number }> = [
     { side: "x+", min: bounds.minY, max: bounds.maxY, face: bounds.maxX },
     { side: "x-", min: bounds.minY, max: bounds.maxY, face: bounds.minX },
@@ -571,7 +624,7 @@ export function planFlangeStations(
   for (const side of sides) {
     const alongY = side.side === "x+" || side.side === "x-";
     const wantMax = side.side === "x+" || side.side === "y+";
-    const spots = spreadAlong(side.min, side.max, (at) => {
+    const spots = spreadAlong(side.min, side.max, tabWidth, (at) => {
       const hits = crossCoord(outer, alongY, at);
       if (!hits.length) return true;
       const wall = wantMax ? Math.max(...hits) : Math.min(...hits);
@@ -583,14 +636,14 @@ export function planFlangeStations(
       let maxY: number;
       if (alongY) {
         const x0 = wall;
-        const x1 = wall + sign * FLANGE_PROTRUSION;
+        const x1 = wall + sign * protrusion;
         minX = Math.min(x0, x1);
         maxX = Math.max(x0, x1);
         minY = at - half;
         maxY = at + half;
       } else {
         const y0 = wall;
-        const y1 = wall + sign * FLANGE_PROTRUSION;
+        const y1 = wall + sign * protrusion;
         minY = Math.min(y0, y1);
         maxY = Math.max(y0, y1);
         minX = at - half;
@@ -609,18 +662,23 @@ export function planFlangeStations(
   return stations;
 }
 
-function flangePair(station: FlangeStation, z0: number, z1: number): { body: Feat; slot: Feat } {
-  const width = flangeWidth();
+function sideSign(side: FlangeSide): 1 | -1 {
+  return side === "x+" || side === "y+" ? 1 : -1;
+}
+
+function flangePair(station: FlangeStation, z0: number, z1: number, profile: TabProfile): { body: Feat; slot: Feat | null } {
+  const width = profile.width;
   const bite = 0.4;
-  const slotInner = FLANGE_PROTRUSION - FLANGE_SLOT_FROM_OUTER - FLANGE_SLOT;
-  const slotOuter = FLANGE_PROTRUSION - FLANGE_SLOT_FROM_OUTER;
-  const sign = station.side === "x+" || station.side === "y+" ? 1 : -1;
+  const sign = sideSign(station.side);
   const bleed = 0.15;
   if (station.side === "x+" || station.side === "x-") {
     const xBite = station.wall - sign * bite;
-    const xTip = station.wall + sign * FLANGE_PROTRUSION;
+    const xTip = station.wall + sign * profile.protrusion;
     const y0 = station.along - width / 2;
     const body = box([Math.min(xBite, xTip), y0, z0], [Math.abs(xTip - xBite), width, z1 - z0]);
+    if (!profile.slotted) return { body, slot: null };
+    const slotInner = profile.protrusion - FLANGE_SLOT_FROM_OUTER - FLANGE_SLOT;
+    const slotOuter = profile.protrusion - FLANGE_SLOT_FROM_OUTER;
     const s0 = station.wall + sign * slotInner;
     const s1 = station.wall + sign * slotOuter;
     const slot = box(
@@ -630,9 +688,12 @@ function flangePair(station: FlangeStation, z0: number, z1: number): { body: Fea
     return { body, slot };
   }
   const yBite = station.wall - sign * bite;
-  const yTip = station.wall + sign * FLANGE_PROTRUSION;
+  const yTip = station.wall + sign * profile.protrusion;
   const x0 = station.along - width / 2;
   const body = box([x0, Math.min(yBite, yTip), z0], [width, Math.abs(yTip - yBite), z1 - z0]);
+  if (!profile.slotted) return { body, slot: null };
+  const slotInner = profile.protrusion - FLANGE_SLOT_FROM_OUTER - FLANGE_SLOT;
+  const slotOuter = profile.protrusion - FLANGE_SLOT_FROM_OUTER;
   const s0 = station.wall + sign * slotInner;
   const s1 = station.wall + sign * slotOuter;
   const slot = box(
@@ -642,6 +703,51 @@ function flangePair(station: FlangeStation, z0: number, z1: number): { body: Fea
   return { body, slot };
 }
 
+/** 45° gusset on the outer face, added outside the grip thickness so the jaw still closes on a flat tab. */
+function binderGusset(station: FlangeStation, profile: TabProfile, zFace: number, below: boolean, outerH: number): Feat | null {
+  const legRoom = below ? zFace : outerH - zFace;
+  const leg = Math.min(profile.thickness, Math.max(0, legRoom));
+  if (leg < 0.4) return null;
+  const run = leg / Math.tan((BINDER_ROOT_CHAMFER * Math.PI) / 180);
+  const sign = sideSign(station.side);
+  const zWall = below ? zFace - leg : zFace + leg;
+  const along0 = station.along - profile.width / 2;
+  const along1 = station.along + profile.width / 2;
+  const corner = (along: number, radial: number, z: number): Vec3 =>
+    station.side === "x+" || station.side === "x-"
+      ? [station.wall + sign * radial, along, z]
+      : [along, station.wall + sign * radial, z];
+  return {
+    kind: "hull",
+    pts: [
+      corner(along0, 0, zFace),
+      corner(along0, run, zFace),
+      corner(along0, 0, zWall),
+      corner(along1, 0, zFace),
+      corner(along1, run, zFace),
+      corner(along1, 0, zWall),
+    ],
+  };
+}
+
+/** Anti-slip groove on the outer face, parallel to the wall. */
+function binderGroove(station: FlangeStation, profile: TabProfile, zFace: number, below: boolean): Feat {
+  const sign = sideSign(station.side);
+  const inner = BINDER_GROOVE_FROM_WALL - BINDER_GROOVE_W / 2;
+  const bleed = 0.05;
+  const zMin = below ? zFace - bleed : zFace - BINDER_GROOVE_D;
+  const depth = BINDER_GROOVE_D + bleed;
+  const along0 = station.along - profile.width / 2;
+  if (station.side === "x+" || station.side === "x-") {
+    const x0 = station.wall + sign * inner;
+    const x1 = station.wall + sign * (inner + BINDER_GROOVE_W);
+    return box([Math.min(x0, x1), along0, zMin], [BINDER_GROOVE_W, profile.width, depth]);
+  }
+  const y0 = station.wall + sign * inner;
+  const y1 = station.wall + sign * (inner + BINDER_GROOVE_W);
+  return box([along0, Math.min(y0, y1), zMin], [profile.width, BINDER_GROOVE_W, depth]);
+}
+
 function placeFlanges(
   outer: Loop,
   outerH: number,
@@ -649,38 +755,59 @@ function placeFlanges(
   avoid: Array<{ x: number; y: number; r: number }>,
   warnings: string[],
   kind: "single" | "pair",
-): { unions: Feat[]; slots: Feat[]; stations: FlangeStation[] } {
-  const stations = planFlangeStations(outer, avoid);
+  binder: BinderSize | null,
+): FlangeBuild {
+  const profile = binder ? binderProfile(binder) : clipProfile();
+  const none = emptyFlange();
+  const stations = planFlangeStations(outer, avoid, profile.width, profile.protrusion);
   if (!stations.length) {
     warnings.push("No cupo ninguna pestaña de cierre junto al borde.");
-    return { unions: [], slots: [], stations: [] };
+    return none;
   }
-  const ranges: Array<[number, number]> = [];
+  const perHalf = profile.thickness;
+  const ranges: Array<{ z0: number; z1: number; faces: Array<"below" | "above"> }> = [];
   if (kind === "single") {
-    const thick = FLANGE_THICKNESS * 2;
+    const thick = perHalf * 2;
     if (outerH < thick + 0.4) {
-      warnings.push("La pared es baja para la pestaña de 10 mm que agarra el clip.");
-      return { unions: [], slots: [], stations: [] };
+      warnings.push(`La pared es baja para la pestaña de ${thick} mm que agarra el clip.`);
+      return none;
     }
     const z0 = (outerH - thick) / 2;
-    ranges.push([z0, z0 + thick]);
+    ranges.push({ z0, z1: z0 + thick, faces: binder ? ["below", "above"] : [] });
   } else {
-    if (cutZ < FLANGE_THICKNESS + 0.2 || outerH - cutZ < FLANGE_THICKNESS + 0.2) {
-      warnings.push("El plano de corte no deja 5 mm de pestaña en cada mitad.");
-      return { unions: [], slots: [], stations: [] };
+    if (cutZ < perHalf + 0.2 || outerH - cutZ < perHalf + 0.2) {
+      warnings.push(`El plano de corte no deja ${perHalf} mm de pestaña en cada mitad.`);
+      return none;
     }
-    ranges.push([cutZ - FLANGE_THICKNESS, cutZ], [cutZ, cutZ + FLANGE_THICKNESS]);
+    ranges.push(
+      { z0: cutZ - perHalf, z1: cutZ, faces: binder ? ["below"] : [] },
+      { z0: cutZ, z1: cutZ + perHalf, faces: binder ? ["above"] : [] },
+    );
   }
-  const unions: Feat[] = [];
-  const slots: Feat[] = [];
-  for (const station of stations) {
-    for (const [z0, z1] of ranges) {
-      const pair = flangePair(station, z0, z1);
-      unions.push(pair.body);
-      slots.push(pair.slot);
-    }
-  }
-  return { unions, slots, stations };
+  const halves: FlangeBuild["halves"] = [
+    { unions: [], slots: [] },
+    { unions: [], slots: [] },
+  ];
+  stations.forEach((station) => {
+    ranges.forEach((range, index) => {
+      const pair = flangePair(station, range.z0, range.z1, profile);
+      const pack = halves[kind === "single" ? 0 : index];
+      pack.unions.push(pair.body);
+      if (pair.slot) pack.slots.push(pair.slot);
+      for (const face of range.faces) {
+        const zFace = face === "below" ? range.z0 : range.z1;
+        const gusset = binderGusset(station, profile, zFace, face === "below", outerH);
+        if (gusset) pack.unions.push(gusset);
+        pack.slots.push(binderGroove(station, profile, zFace, face === "below"));
+      }
+    });
+  });
+  return {
+    unions: halves[0].unions,
+    slots: halves[0].slots,
+    stations,
+    halves,
+  };
 }
 
 function planTwoPart(
@@ -781,9 +908,19 @@ function planTwoPart(
   );
 
   const cup = placePartingFunnel(outer, cavCut, wall, cutZ, params);
-  const flange = params.clampEnabled
-    ? placeFlanges(outer, outerH, cutZ, pourKeepouts(outer, wall, params), warnings, "pair")
-    : { unions: [] as Feat[], slots: [] as Feat[], stations: [] as FlangeStation[] };
+  const closure = closureOf(params);
+  const flange =
+    closure === "none"
+      ? emptyFlange()
+      : placeFlanges(
+          outer,
+          outerH,
+          cutZ,
+          pourKeepouts(outer, wall, params),
+          warnings,
+          "pair",
+          closure === "binder" ? binderSizeById(params.binderSize) : null,
+        );
 
   const tBottom = innerH > 1e-9 ? (cutZ + 0.08 - cavZ0) / innerH : 0;
   const tTop = innerH > 1e-9 ? (cutZ - 0.08 - cavZ0) / innerH : 0;
@@ -796,18 +933,17 @@ function planTwoPart(
     id: "2part_bottom",
     role: "mold",
     split: true,
-    // placeFlanges emits [bottom, top] per station, so even entries belong to this half.
-    unions: [poly(outer, outer, 0, cutZ), ...tongues, ...pins, cup.outerBottom, ...flange.unions.filter((_, i) => i % 2 === 0)],
+    unions: [poly(outer, outer, 0, cutZ), ...tongues, ...pins, cup.outerBottom, ...flange.halves[0].unions],
     carve: [bottomCarve],
-    subtracts: [cup.channel, cup.innerBottom, ...flange.slots.filter((_, i) => i % 2 === 0)],
+    subtracts: [cup.channel, cup.innerBottom, ...flange.halves[0].slots],
   };
   const top: SolidSpec = {
     id: "2part_top",
     role: "mold",
     split: true,
-    unions: [poly(outer, outer, cutZ, outerH), ...bosses, cup.outerTop, ...flange.unions.filter((_, i) => i % 2 === 1)],
+    unions: [poly(outer, outer, cutZ, outerH), ...bosses, cup.outerTop, ...flange.halves[1].unions],
     carve: [topCarve],
-    subtracts: [...grooves, ...holes, cup.channel, cup.innerTop, ...flange.slots.filter((_, i) => i % 2 === 1)],
+    subtracts: [...grooves, ...holes, cup.channel, cup.innerTop, ...flange.halves[1].slots],
   };
 
   const cav = loftVolume(cavityBottom, designTop, innerH);
