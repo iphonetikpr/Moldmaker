@@ -89,6 +89,10 @@ export class Kernel {
       return this.cyl(f.axis, f.origin, f.height, f.radius, f.zMin, f.zMax);
     }
     if (f.kind === "poly") return this.poly(f.bottom, f.top, f.z0, f.z1, f.holeBottom, f.holeTop);
+    if (f.kind === "hull") {
+      if (f.pts.length < 4) return this.track(this.wasm.Manifold.cube([0, 0, 0], false));
+      return this.track(this.wasm.Manifold.hull(f.pts));
+    }
     return this.frustum(f.z0, f.z1, f.hx0, f.hy0, f.hx1, f.hy1);
   }
 

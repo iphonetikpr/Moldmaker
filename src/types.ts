@@ -1,5 +1,8 @@
 export type SystemId = "adapted" | "tray" | "twopart";
 
+/** How the mold is held shut. Printed wedge clips stay the default. */
+export type ClosureId = "clips" | "binder" | "none";
+
 export type StepId = "import" | "system" | "params" | "preview" | "export";
 
 export type UpAxis = "z+" | "z-" | "y+" | "y-" | "x+" | "x-";
@@ -22,6 +25,9 @@ export interface MoldParams {
   clampSlot: number;
   clampClearance: number;
   clampEnabled: boolean;
+  closure: ClosureId;
+  /** Nominal binder-clip size, mm. Ignored unless closure is binder. */
+  binderSize: number;
   castShrinkPct: number;
   cutRatio: number;
 }

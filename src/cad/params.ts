@@ -1,8 +1,18 @@
-import { DEFAULTS } from "../constants";
-import type { MoldParams } from "../types";
+import { BINDER_DEFAULT_SIZE, BINDER_SIZES, DEFAULTS } from "../constants";
+import type { ClosureId, MoldParams } from "../types";
 
 export function defaultParams(): MoldParams {
   return { ...DEFAULTS };
+}
+
+/**
+ * Printed clips stay the default. An explicit binder choice wins.
+ * `clampEnabled: false` still means no closure, so older callers keep a bare shell.
+ */
+export function closureOf(p: { closure?: ClosureId; clampEnabled?: boolean }): ClosureId {
+  if (p.closure === "binder") return "binder";
+  if (p.clampEnabled === false || p.closure === "none") return "none";
+  return "clips";
 }
 
 function num(v: number, min: number, max: number, fallback: number): number {
@@ -29,6 +39,8 @@ export function sanitizeParams(p: MoldParams): MoldParams {
   const clampClearance = num(p.clampClearance, 0, 2, DEFAULTS.clampClearance);
   const castShrinkPct = num(p.castShrinkPct, 0, 15, DEFAULTS.castShrinkPct);
   const cutRatio = num(p.cutRatio, 0.2, 0.8, DEFAULTS.cutRatio);
+  const closure = closureOf(p);
+  const binderSize = BINDER_SIZES.some((row) => row.size === p.binderSize) ? p.binderSize : BINDER_DEFAULT_SIZE;
   return {
     wallThickness,
     draftDeg,
@@ -44,7 +56,9 @@ export function sanitizeParams(p: MoldParams): MoldParams {
     splitEnabled: Boolean(p.splitEnabled),
     clampSlot,
     clampClearance,
-    clampEnabled: Boolean(p.clampEnabled),
+    clampEnabled: closure !== "none",
+    closure,
+    binderSize,
     castShrinkPct,
     cutRatio,
   };

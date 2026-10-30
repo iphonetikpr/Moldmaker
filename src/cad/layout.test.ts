@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULTS, FLANGE_PROTRUSION, FLANGE_SLOT, FLANGE_SLOT_FROM_OUTER, FLANGE_THICKNESS } from "../constants";
+import {
+  BINDER_DEFAULT_SIZE,
+  BINDER_GROOVE_D,
+  BINDER_GROOVE_FROM_WALL,
+  BINDER_GROOVE_W,
+  BINDER_ROOT_CHAMFER,
+  BINDER_SIZES,
+  BINDER_TAB_W,
+  DEFAULTS,
+  FLANGE_PROTRUSION,
+  FLANGE_SLOT,
+  FLANGE_SLOT_FROM_OUTER,
+  FLANGE_THICKNESS,
+  binderPrintNotes,
+  binderSizeById,
+} from "../constants";
 import type { MoldParams, Vec3 } from "../types";
 import { frustumVolume, planMold, profileLabel, type Feat } from "./layout";
 import { isAxisAlignedRect, isConcave, offsetClean, pointInPoly, polyArea, loopBounds, type Loop } from "./outline";
@@ -205,6 +220,88 @@ describe("layout", () => {
     const cut = plan.metrics.cutZ;
     expect(boxes(plan.solids[0].unions)).toHaveLength(10);
     expect(boxes(plan.solids[1].unions).every((b) => Math.abs(b.min[2] - cut) < 1e-6)).toBe(true);
+  });
+
+  it("offers binder sizes as a table and keeps 19 mm out", () => {
+    expect(BINDER_SIZES.map((row) => row.size)).toEqual([25, 32, 41, 51]);
+    expect(BINDER_SIZES.some((row) => row.size === 19)).toBe(false);
+    expect(BINDER_DEFAULT_SIZE).toBe(32);
+    expect(BINDER_TAB_W).toBe(36);
+    expect(BINDER_GROOVE_W).toBe(3);
+    expect(BINDER_GROOVE_D).toBe(0.8);
+    expect(BINDER_GROOVE_FROM_WALL).toBe(9);
+    expect(BINDER_ROOT_CHAMFER).toBe(45);
+    expect(BINDER_SIZES.find((row) => row.size === 25)).toMatchObject({ thickness: 4, width: 29, protrusion: 16.3, note: "solo PLA" });
+    expect(BINDER_SIZES.find((row) => row.size === 32)).toMatchObject({ thickness: 5, width: 36, protrusion: 16.3 });
+    expect(BINDER_SIZES.find((row) => row.size === 41)).toMatchObject({ thickness: 6.5, width: 45, protrusion: 16.3 });
+    expect(BINDER_SIZES.find((row) => row.size === 51)).toMatchObject({ thickness: 9, width: 55, protrusion: 20 });
+    expect(binderSizeById(19).size).toBe(32);
+    const notes = binderPrintNotes(binderSizeById(41), 10);
+    expect(notes).toContain("Binder clips: 10");
+    expect(notes).toContain("Tamaño seleccionado: 41 mm");
+    expect(notes).toContain("6.5 mm por mitad");
+    expect(notes).toContain("0.3 mm");
+  });
+
+  it("builds a flat binder tab with a root gusset and an anti-slip groove", () => {
+    const plan = planMold("twopart", part, 24000, params({ draftDeg: 0, closure: "binder", binderSize: 32 }));
+    expect(plan.clipCount).toBe(3);
+    expect(plan.flanges.map((f) => f.side).sort()).toEqual(["x-", "y+", "y-"]);
+    const cut = plan.metrics.cutZ;
+    const bottom = boxes(plan.solids[0].unions);
+    const top = boxes(plan.solids[1].unions);
+    expect(bottom).toHaveLength(3);
+    expect(top).toHaveLength(3);
+    const station = plan.flanges.find((f) => f.side === "x-");
+    expect(station).toBeTruthy();
+    if (!station) return;
+    const body = bottom.find((b) => b.min[0] < station.wall);
+    expect(body).toBeTruthy();
+    if (!body) return;
+    expect(body.size[1]).toBeCloseTo(BINDER_TAB_W);
+    expect(body.size[2]).toBeCloseTo(5);
+    expect(body.min[2]).toBeCloseTo(cut - 5);
+    expect(body.min[0]).toBeCloseTo(station.wall - 16.3);
+    expect(top.find((b) => Math.abs(b.min[0] - body.min[0]) < 1e-6)?.min[2]).toBeCloseTo(cut);
+    const through = boxes(plan.solids[0].subtracts).filter((b) => Math.abs(b.size[0] - FLANGE_SLOT) < 1e-6 && b.size[2] > 2);
+    expect(through).toHaveLength(0);
+    const groove = boxes(plan.solids[0].subtracts).find((b) => Math.abs(b.size[0] - BINDER_GROOVE_W) < 1e-6 && b.min[0] < station.wall);
+    expect(groove).toBeTruthy();
+    if (!groove) return;
+    expect(groove.min[0]).toBeCloseTo(station.wall - (BINDER_GROOVE_FROM_WALL + BINDER_GROOVE_W / 2));
+    expect(groove.size[1]).toBeCloseTo(BINDER_TAB_W);
+    expect(groove.min[2]).toBeCloseTo(cut - 5 - 0.05);
+    expect(groove.size[2]).toBeCloseTo(BINDER_GROOVE_D + 0.05);
+    const topGroove = boxes(plan.solids[1].subtracts).find((b) => Math.abs(b.min[0] - groove.min[0]) < 1e-6);
+    expect(topGroove?.min[2]).toBeCloseTo(cut + 5 - BINDER_GROOVE_D);
+    expect(plan.solids[0].unions.some((f) => f.kind === "hull")).toBe(true);
+    expect(plan.solids[1].unions.some((f) => f.kind === "hull")).toBe(true);
+  });
+
+  it("thickens only binder tabs, and reads 51 mm from the table", () => {
+    const clips = planMold("twopart", part, 24000, params({ draftDeg: 0, closure: "clips", binderSize: 51 }));
+    const clipBody = boxes(clips.solids[0].unions)[0];
+    expect(clipBody.size[2]).toBeCloseTo(FLANGE_THICKNESS);
+    expect([clipBody.size[0], clipBody.size[1]].some((n) => Math.abs(n - (FLANGE_SLOT + 2 * FLANGE_SLOT_FROM_OUTER)) < 1e-6)).toBe(true);
+
+    const binder = planMold("twopart", [200, 150, 40], 1, params({ draftDeg: 0, closure: "binder", binderSize: 51 }));
+    expect(binder.clipCount).toBeGreaterThan(0);
+    const body = boxes(binder.solids[0].unions)[0];
+    expect(body.size[2]).toBeCloseTo(9);
+    const span = [body.size[0], body.size[1]];
+    expect(span.some((n) => Math.abs(n - 55) < 1e-6)).toBe(true);
+    expect(span.some((n) => Math.abs(n - 20.4) < 1e-6)).toBe(true);
+  });
+
+  it("gives every shell a binder tab, including tray and adapted", () => {
+    const tray = planMold("tray", part, 24000, params({ draftDeg: 0, closure: "binder", binderSize: 25 }));
+    expect(tray.clipCount).toBe(4);
+    expect(boxes(tray.solids[0].unions).every((b) => Math.abs(b.size[2] - 8) < 1e-6)).toBe(true);
+    expect(boxes(tray.solids[0].subtracts).filter((b) => Math.abs(b.size[2] - (BINDER_GROOVE_D + 0.05)) < 1e-6)).toHaveLength(8);
+    const adapted = planMold("adapted", part, 24000, params({ draftDeg: 0, closure: "binder" }));
+    expect(adapted.clipCount).toBe(3);
+    const tabs = boxes(adapted.solids[0].unions).filter((b) => Math.abs(b.size[2] - 10) < 1e-6);
+    expect(tabs).toHaveLength(3);
   });
 
   it("omits flanges when the toggle is off or a half is shorter than 5 mm", () => {

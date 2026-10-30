@@ -5,7 +5,7 @@ import { defaultParams } from "./params";
 import { initKernel } from "./kernel";
 import { generateMold } from "./generate";
 import { sampleMaster } from "./mesh";
-import { FLANGE_PROTRUSION, FLANGE_SLOT, FLANGE_SLOT_FROM_OUTER, FLANGE_THICKNESS } from "../constants";
+import { BINDER_GROOVE_FROM_WALL, FLANGE_PROTRUSION, FLANGE_SLOT, FLANGE_SLOT_FROM_OUTER, FLANGE_THICKNESS } from "../constants";
 import { loftMesh, offsetClean, polyArea, type Loop } from "./outline";
 import type { MeshData } from "../types";
 import { profileLabel } from "./layout";
@@ -309,6 +309,32 @@ describe("generate", () => {
     const span = bboxSize(bboxOf(large.parts[0].mesh));
     expect(span[0]).toBeGreaterThan(207 + FLANGE_PROTRUSION);
     expect(span[1]).toBeGreaterThan(157 + FLANGE_PROTRUSION);
+  });
+
+  it("cuts a binder groove and leaves the tab solid where a clip slot would be", async () => {
+    const kernel = await initKernel();
+    const two = generateMold(kernel, {
+      mesh: boxMesh([40, 30, 28]),
+      name: "binder",
+      system: "twopart",
+      params: { ...defaultParams(), draftDeg: 0, closure: "binder", binderSize: 32 },
+      up: "z+",
+      rotDeg: 0,
+    });
+    expect(two.clipCount).toBe(3);
+    const cut = 3 + 0.5 + 14;
+    const wall = -47 / 2;
+    const probe = (part: number, x: number, z: number) => {
+      const bit = kernel.box([x - 0.2, -0.2, z - 0.15], [0.4, 0.4, 0.3]);
+      return kernel.intersect(kernel.fromMesh(two.parts[part].mesh), bit).volume();
+    };
+    const grooveX = wall - BINDER_GROOVE_FROM_WALL;
+    expect(probe(0, grooveX, cut - 5 + 0.35)).toBeLessThan(1e-4);
+    expect(probe(1, grooveX, cut + 5 - 0.35)).toBeLessThan(1e-4);
+    const mid = wall - (FLANGE_PROTRUSION - FLANGE_SLOT_FROM_OUTER - FLANGE_SLOT / 2);
+    expect(probe(0, mid, cut - 2.5)).toBeGreaterThan(0.02);
+    expect(probe(1, mid, cut + 2.5)).toBeGreaterThan(0.02);
+    expect(probe(0, wall - FLANGE_PROTRUSION + 1, cut - 2.5)).toBeGreaterThan(0.02);
   });
 });
 

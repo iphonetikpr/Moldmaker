@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { ACCESSORY_GROUPS, CLIP_PRINT_NOTE, clipPrintNotes, loadClipZipEntries } from "./accessories";
+import { BINDER_SIZES, binderPrintNotes, binderSizeById } from "./constants";
 import { bboxOf, bboxSize, sampleMaster, signedVolume, triangleCount } from "./cad/mesh";
 import { parseOBJ } from "./cad/obj";
 import { parseSVG } from "./cad/svg";
 import { generateMold } from "./cad/generate";
 import { profileHint, profileLabel } from "./cad/layout";
 import { initKernel, type Kernel } from "./cad/kernel";
-import { defaultParams, sanitizeParams } from "./cad/params";
+import { closureOf, defaultParams, sanitizeParams } from "./cad/params";
 import { parseSTL } from "./cad/stl";
-import type { MeshData, MoldParams, StepId, SystemId, UpAxis } from "./types";
+import type { ClosureId, MeshData, MoldParams, StepId, SystemId, UpAxis } from "./types";
 import { safeName } from "./cad/export";
 import { downloadBytes, downloadZip, type ZipExtra } from "./ui/download";
 import { NumberField } from "./ui/NumberField";
@@ -121,6 +122,10 @@ export default function App() {
     setParams((prev) => sanitizeParams({ ...prev, [key]: value }));
   }
 
+  function setClosure(closure: ClosureId) {
+    setParams((prev) => sanitizeParams({ ...prev, closure, clampEnabled: closure !== "none" }));
+  }
+
   const built = result?.ok ? result.value : null;
   const systemTitle = SYSTEMS.find((s) => s.id === system)?.title ?? system;
 
@@ -134,7 +139,10 @@ export default function App() {
     if (!built) return;
     setZipError(null);
     const extras: ZipExtra[] = [];
-    if (includeClips && built.clipCount > 0) {
+    const closure = closureOf(params);
+    if (closure === "binder" && built.clipCount > 0) {
+      extras.push({ path: "print_notes.txt", data: binderPrintNotes(binderSizeById(params.binderSize), built.clipCount) });
+    } else if (includeClips && closure === "clips" && built.clipCount > 0) {
       try {
         const clips = await loadClipZipEntries(built.clipCount);
         extras.push(...clips);
@@ -279,10 +287,30 @@ export default function App() {
               <Field label="Holgura abrazadera" k="cc" v={params.clampClearance} step={0.05} min={0} max={2} set={(n) => setParam("clampClearance", n)} />
               <Field label="Contracción %" k="sh" v={params.castShrinkPct} step={0.1} min={0} max={15} set={(n) => setParam("castShrinkPct", n)} />
               <Field label="Corte Z (0–1)" k="cut" v={params.cutRatio} step={0.05} min={0.2} max={0.8} set={(n) => setParam("cutRatio", n)} />
-              <label className="chk">
-                <input type="checkbox" checked={params.clampEnabled} onChange={(e) => setParam("clampEnabled", e.target.checked)} />
-                <span>Pestañas de cierre (clips)</span>
-              </label>
+              <div className="row">
+                <label htmlFor="cierre">Cierre</label>
+                <select id="cierre" value={closureOf(params)} onChange={(e) => setClosure(e.target.value as ClosureId)}>
+                  <option value="clips">Clips impresos</option>
+                  <option value="binder">Binder clips</option>
+                  <option value="none">Ninguno</option>
+                </select>
+              </div>
+              {closureOf(params) === "binder" && (
+                <div className="row">
+                  <label htmlFor="binder-size">Tamaño de clip</label>
+                  <select
+                    id="binder-size"
+                    value={params.binderSize}
+                    onChange={(e) => setParam("binderSize", Number(e.target.value))}
+                  >
+                    {BINDER_SIZES.map((row) => (
+                      <option key={row.size} value={row.size}>
+                        {row.size} mm{row.note ? `, ${row.note}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <label className="chk">
                 <input type="checkbox" checked={params.splitEnabled} onChange={(e) => setParam("splitEnabled", e.target.checked)} />
                 <span>Dividir si supera la cama</span>
@@ -293,7 +321,7 @@ export default function App() {
                 Restaurar valores
               </button>
               <p className="hint">
-                Valores de partida: pared 3 mm, salida 1.5°, holgura 0.5 mm, embudo Ø12, canal 4×4, pin Ø3 / agujero Ø3.25 / alcance 5, división 250 mm con solape 2.5, pestaña 5 mm por mitad (vuelo 16.3, ranura 8.3), holgura de sello 0.3, contracción 0.
+                Valores de partida: pared 3 mm, salida 1.5°, holgura 0.5 mm, embudo Ø12, canal 4×4, pin Ø3 / agujero Ø3.25 / alcance 5, división 250 mm con solape 2.5, clips impresos (pestaña 5 mm por mitad, vuelo 16.3, ranura 8.3). Binder clips usa la tabla de tamaños (32 mm por defecto). Holgura de sello 0.3, contracción 0.
               </p>
             </section>
           )}
@@ -323,7 +351,7 @@ export default function App() {
                     <b>Z +{built.masterLift.toFixed(2)} mm</b>
                   </div>
                   <div>
-                    <span>Clips</span>
+                    <span>{closureOf(params) === "binder" ? "Binder clips" : "Clips"}</span>
                     <b>{built.clipCount}</b>
                   </div>
                 </div>
@@ -349,7 +377,11 @@ export default function App() {
                       <b>Descargar todo (.zip)</b>
                       <span>
                         STL binarios, milímetros
-                        {includeClips && built.clipCount > 0 ? ` · ${built.clipCount} clips` : ""}
+                        {closureOf(params) === "binder" && built.clipCount > 0
+                          ? ` · ${built.clipCount} binder clips`
+                          : includeClips && closureOf(params) === "clips" && built.clipCount > 0
+                            ? ` · ${built.clipCount} clips`
+                            : ""}
                       </span>
                     </button>
                   </div>
@@ -362,7 +394,9 @@ export default function App() {
                       <span>Incluir clips</span>
                     </label>
                     <p className="hint">
-                      Con la casilla activa el ZIP incluye los STL del clip, en la cantidad que muestra Preview ({built.clipCount}), y print_notes.txt.
+                      {closureOf(params) === "binder"
+                        ? `El ZIP incluye print_notes.txt con el tamaño seleccionado y ${built.clipCount} binder clips.`
+                        : `Con la casilla activa el ZIP incluye los STL del clip, en la cantidad que muestra Preview (${built.clipCount}), y print_notes.txt.`}
                     </p>
                     {ACCESSORY_GROUPS.map((group) => {
                       const downloads = group.files.filter((f) => f.name.toLowerCase().endsWith(".stl"));
