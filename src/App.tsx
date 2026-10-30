@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ACCESSORY_GROUPS, CLIP_PRINT_NOTE, clipPrintNotes, loadClipZipEntries } from "./accessories";
-import { BINDER_SIZES, binderPrintNotes, binderSizeById } from "./constants";
+import { BINDER_SIZES, binderPrintNotes, binderProvisionalNote, binderSizeById } from "./constants";
 import { bboxOf, bboxSize, sampleMaster, signedVolume, triangleCount } from "./cad/mesh";
 import { parseOBJ } from "./cad/obj";
 import { parseSVG } from "./cad/svg";
@@ -301,15 +301,21 @@ export default function App() {
                   <select
                     id="binder-size"
                     value={params.binderSize}
+                    title={binderSizeById(params.binderSize).provisional ? binderProvisionalNote(binderSizeById(params.binderSize)) : "Tamaño de binder clip"}
                     onChange={(e) => setParam("binderSize", Number(e.target.value))}
                   >
                     {BINDER_SIZES.map((row) => (
-                      <option key={row.size} value={row.size}>
-                        {row.size} mm{row.note ? `, ${row.note}` : ""}
+                      <option key={row.size} value={row.size} title={row.provisional ? binderProvisionalNote(row) : undefined}>
+                        {row.size} mm{row.provisional ? ", provisional" : ""}
                       </option>
                     ))}
                   </select>
                 </div>
+              )}
+              {closureOf(params) === "binder" && binderSizeById(params.binderSize).provisional && (
+                <p className="hint" title={binderProvisionalNote(binderSizeById(params.binderSize))}>
+                  {binderProvisionalNote(binderSizeById(params.binderSize))}
+                </p>
               )}
               <label className="chk">
                 <input type="checkbox" checked={params.splitEnabled} onChange={(e) => setParam("splitEnabled", e.target.checked)} />

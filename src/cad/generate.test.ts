@@ -5,7 +5,7 @@ import { defaultParams } from "./params";
 import { initKernel } from "./kernel";
 import { generateMold } from "./generate";
 import { sampleMaster } from "./mesh";
-import { BINDER_GROOVE_FROM_WALL, FLANGE_PROTRUSION, FLANGE_SLOT, FLANGE_SLOT_FROM_OUTER, FLANGE_THICKNESS } from "../constants";
+import { FLANGE_PROTRUSION, FLANGE_SLOT, FLANGE_SLOT_FROM_OUTER, FLANGE_THICKNESS } from "../constants";
 import { loftMesh, offsetClean, polyArea, type Loop } from "./outline";
 import type { MeshData } from "../types";
 import { profileLabel } from "./layout";
@@ -328,7 +328,7 @@ describe("generate", () => {
       const bit = kernel.box([x - 0.2, -0.2, z - 0.15], [0.4, 0.4, 0.3]);
       return kernel.intersect(kernel.fromMesh(two.parts[part].mesh), bit).volume();
     };
-    const grooveX = wall - BINDER_GROOVE_FROM_WALL;
+    const grooveX = wall - (16.3 - 7);
     expect(probe(0, grooveX, cut - 5 + 0.35)).toBeLessThan(1e-4);
     expect(probe(1, grooveX, cut + 5 - 0.35)).toBeLessThan(1e-4);
     const mid = wall - (FLANGE_PROTRUSION - FLANGE_SLOT_FROM_OUTER - FLANGE_SLOT / 2);

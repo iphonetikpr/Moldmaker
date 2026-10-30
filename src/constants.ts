@@ -51,16 +51,18 @@ export const CLIP_PRINT_NOTE =
   "PETG acostado, 5–6 paredes, 40–50 % relleno; tuerca M6 encajada (hueco hex 10.2–10.3 mm)";
 
 /**
- * Binder-clip tabs. Same station pitch as the printed clip.
- * Groove and root angle are shared. Thickness, width and protrusion come from the row.
- * Append a 75 mm jumbo row to BINDER_SIZES later; the selector and the solids both read the list.
- * 19 mm is intentionally absent (the jaw is too small for these tabs).
+ * Binder-clip tabs. The selector and the solids both read BINDER_SIZES.
+ * Groove position is measured from the tab tip, not from the wall.
+ * Count per side is max(minCount, ceil(side / pitch)).
+ * 19 mm and 25 mm are not offered.
  */
 export const BINDER_TAB_W = 36;
 export const BINDER_GROOVE_W = 3;
 export const BINDER_GROOVE_D = 0.8;
-export const BINDER_GROOVE_FROM_WALL = 9;
 export const BINDER_ROOT_CHAMFER = 45;
+/** Clearance from each corner to the tab edge. If the computed count does not fit, one centered tab is used. */
+export const BINDER_CORNER_MARGIN = 10;
+export const BINDER_RIB_W = 3;
 export const BINDER_DEFAULT_SIZE = 32;
 
 export interface BinderSize {
@@ -72,31 +74,46 @@ export interface BinderSize {
   width: number;
   /** How far the tab stands out from the outer wall, mm. */
   protrusion: number;
-  /** Short label, shown next to the size. */
-  note?: string;
+  /** Distance from the tab tip to the groove centerline, mm. */
+  grooveFromTip: number;
+  /** Station pitch. Count = max(minCount, ceil(side / pitch)). */
+  pitch: number;
+  /** Floor on the station count. Jumbo is at least one per side before the corner rule. */
+  minCount: number;
+  /** Narrow 45° ribs under the tab, along the protrusion. */
+  ribs: number;
+  /** Jaw opening is assumed, not measured. */
+  provisional?: boolean;
 }
 
 export const BINDER_SIZES: readonly BinderSize[] = [
-  { size: 25, thickness: 4, width: 29, protrusion: 16.3, note: "solo PLA" },
-  { size: 32, thickness: 5, width: BINDER_TAB_W, protrusion: 16.3 },
-  { size: 41, thickness: 6.5, width: 45, protrusion: 16.3 },
-  { size: 51, thickness: 9, width: 55, protrusion: 20 },
+  { size: 32, thickness: 5, width: BINDER_TAB_W, protrusion: 16.3, grooveFromTip: 7, pitch: 80, minCount: 1, ribs: 0 },
+  { size: 41, thickness: 7, width: 45, protrusion: 20, grooveFromTip: 9, pitch: 80, minCount: 1, ribs: 0 },
+  { size: 51, thickness: 10, width: 55, protrusion: 24, grooveFromTip: 11, pitch: 100, minCount: 1, ribs: 0 },
+  { size: 75, thickness: 8, width: 80, protrusion: 40, grooveFromTip: 34, pitch: 150, minCount: 1, ribs: 2, provisional: true },
 ];
 
 export function binderSizeById(size: number): BinderSize {
   return BINDER_SIZES.find((row) => row.size === size) ?? BINDER_SIZES.find((row) => row.size === BINDER_DEFAULT_SIZE)!;
 }
 
+/** Tooltip and print note for the jumbo row. Jaw opening is assumed 20 mm. */
+export function binderProvisionalNote(row: BinderSize): string {
+  return `Provisional: abertura de mordaza supuesta 20 mm en el clip de ${row.size} mm. Mide la abertura máxima. Si abre 23 mm o más, el espesor puede subir a 10 mm por mitad.`;
+}
+
 export function binderPrintNotes(row: BinderSize, count: number): string {
-  const tag = row.note ? ` (${row.note})` : "";
-  return [
+  const heavy = row.size >= 51;
+  const lines = [
     `Binder clips: ${count}`,
-    `Tamaño seleccionado: ${row.size} mm${tag} — ${row.thickness} mm por mitad, ${row.thickness * 2} mm en total, pestaña ${row.width} × ${row.protrusion} mm.`,
-    "Tamaño recomendado 32 mm (abre unos 13 mm; 41 mm también sirve; 19 mm queda corto).",
-    "Pestañas: acostadas en la cama, 5 paredes, 40 % relleno. PLA mínimo 4 mm por mitad.",
-    "Prueba de fluencia 24 h: volver a medir si se doblaron más de 0.3 mm.",
-    "",
-  ].join("\n");
+    `Tamaño seleccionado: ${row.size} mm — ${row.thickness} mm por mitad, ${row.thickness * 2} mm en total, pestaña ${row.width} × ${row.protrusion} mm, ranura a ${row.grooveFromTip} mm de la punta.`,
+    heavy
+      ? "Pestañas acostadas en la cama, 6 paredes, 50 % relleno."
+      : "Pestañas acostadas en la cama, 5 paredes, 40 % relleno.",
+  ];
+  if (row.provisional) lines.push(binderProvisionalNote(row));
+  lines.push("");
+  return lines.join("\n");
 }
 
 export const THEME_KEY = "moldmaker.theme";
