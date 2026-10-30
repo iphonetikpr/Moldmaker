@@ -1,7 +1,8 @@
 import {
+  BINDER_CORNER_MARGIN,
   BINDER_GROOVE_D,
-  BINDER_GROOVE_FROM_WALL,
   BINDER_GROOVE_W,
+  BINDER_RIB_W,
   BINDER_ROOT_CHAMFER,
   FLANGE_PITCH,
   FLANGE_PROTRUSION,
@@ -494,14 +495,31 @@ interface TabProfile {
   /** Per half. A one-piece shell stacks two of these into one tab. */
   thickness: number;
   slotted: boolean;
+  /** Distance from the tab tip to the groove centerline. Binder only. */
+  grooveFromTip: number;
+  ribs: number;
 }
 
 function clipProfile(): TabProfile {
-  return { width: flangeWidth(), protrusion: FLANGE_PROTRUSION, thickness: FLANGE_THICKNESS, slotted: true };
+  return {
+    width: flangeWidth(),
+    protrusion: FLANGE_PROTRUSION,
+    thickness: FLANGE_THICKNESS,
+    slotted: true,
+    grooveFromTip: 0,
+    ribs: 0,
+  };
 }
 
 function binderProfile(row: BinderSize): TabProfile {
-  return { width: row.width, protrusion: row.protrusion, thickness: row.thickness, slotted: false };
+  return {
+    width: row.width,
+    protrusion: row.protrusion,
+    thickness: row.thickness,
+    slotted: false,
+    grooveFromTip: row.grooveFromTip,
+    ribs: row.ribs,
+  };
 }
 
 interface FlangeBuild {
@@ -591,6 +609,47 @@ function spreadAlong(min: number, max: number, tabWidth: number, blocked: (at: n
   return placed;
 }
 
+/**
+ * Binder stations. Count is max(minCount, ceil(side / pitch)).
+ * If that count cannot keep the tab width plus 10 mm clear of each corner, one centered tab is used.
+ */
+function spreadBinder(min: number, max: number, row: BinderSize, blocked: (at: number) => boolean): number[] {
+  const length = max - min;
+  const width = row.width;
+  const n = Math.max(row.minCount, Math.ceil(length / row.pitch));
+  const half = width / 2;
+  const lo = min + half + BINDER_CORNER_MARGIN;
+  const hi = max - half - BINDER_CORNER_MARGIN;
+  const idealOf = (count: number) => Array.from({ length: count }, (_, i) => min + ((i + 1) / (count + 1)) * length);
+  const fits = (pts: number[]) =>
+    pts.length > 0 &&
+    pts.every((at, i) => at >= lo - 1e-6 && at <= hi + 1e-6 && (i === 0 || at - pts[i - 1] >= width - 1e-6));
+  const wanted = idealOf(Math.max(1, n));
+  const targets = fits(wanted) ? wanted : [(min + max) / 2];
+  const placed: number[] = [];
+  const free = (at: number) => !blocked(at) && placed.every((p) => Math.abs(p - at) >= width + 1);
+  for (const target of targets) {
+    if (free(target)) {
+      placed.push(target);
+      continue;
+    }
+    let found: number | null = null;
+    const span = Math.ceil(Math.max(length, 1));
+    for (let step = 1; step <= span && found == null; step++) {
+      for (const sign of [1, -1] as const) {
+        const at = target + sign * step;
+        if (at < min + half || at > max - half) continue;
+        if (free(at)) {
+          found = at;
+          break;
+        }
+      }
+    }
+    if (found != null) placed.push(found);
+  }
+  return placed;
+}
+
 function rectHitsCircle(
   minX: number,
   minY: number,
@@ -611,6 +670,7 @@ export function planFlangeStations(
   avoid: Array<{ x: number; y: number; r: number }>,
   tabWidth = flangeWidth(),
   protrusion = FLANGE_PROTRUSION,
+  binder: BinderSize | null = null,
 ): FlangeStation[] {
   const bounds = loopBounds(outer);
   const half = tabWidth / 2;
@@ -624,7 +684,7 @@ export function planFlangeStations(
   for (const side of sides) {
     const alongY = side.side === "x+" || side.side === "x-";
     const wantMax = side.side === "x+" || side.side === "y+";
-    const spots = spreadAlong(side.min, side.max, tabWidth, (at) => {
+    const blocked = (at: number) => {
       const hits = crossCoord(outer, alongY, at);
       if (!hits.length) return true;
       const wall = wantMax ? Math.max(...hits) : Math.min(...hits);
@@ -650,7 +710,10 @@ export function planFlangeStations(
         maxX = at + half;
       }
       return avoid.some((c) => rectHitsCircle(minX, minY, maxX, maxY, c.x, c.y, c.r));
-    });
+    };
+    const spots = binder
+      ? spreadBinder(side.min, side.max, binder, blocked)
+      : spreadAlong(side.min, side.max, tabWidth, blocked);
     for (const along of spots) {
       const hits = crossCoord(outer, alongY, along);
       if (!hits.length) continue;
@@ -730,10 +793,11 @@ function binderGusset(station: FlangeStation, profile: TabProfile, zFace: number
   };
 }
 
-/** Anti-slip groove on the outer face, parallel to the wall. */
+/** Anti-slip groove on the outer face. `grooveFromTip` is the centerline measured from the tab tip. */
 function binderGroove(station: FlangeStation, profile: TabProfile, zFace: number, below: boolean): Feat {
   const sign = sideSign(station.side);
-  const inner = BINDER_GROOVE_FROM_WALL - BINDER_GROOVE_W / 2;
+  const fromWall = profile.protrusion - profile.grooveFromTip;
+  const inner = fromWall - BINDER_GROOVE_W / 2;
   const bleed = 0.05;
   const zMin = below ? zFace - bleed : zFace - BINDER_GROOVE_D;
   const depth = BINDER_GROOVE_D + bleed;
@@ -748,6 +812,38 @@ function binderGroove(station: FlangeStation, profile: TabProfile, zFace: number
   return box([along0, Math.min(y0, y1), zMin], [profile.width, BINDER_GROOVE_W, depth]);
 }
 
+/** Two narrow 45° ribs under a jumbo tab, running the full protrusion. */
+function binderRibs(station: FlangeStation, profile: TabProfile, zFace: number, below: boolean, outerH: number): Feat[] {
+  if (profile.ribs < 1) return [];
+  const room = below ? zFace : outerH - zFace;
+  const rise = Math.min(BINDER_RIB_W, Math.max(0, room));
+  if (rise < 0.4) return [];
+  const sign = sideSign(station.side);
+  const zApex = below ? zFace - rise : zFace + rise;
+  const out: Feat[] = [];
+  for (let i = 0; i < profile.ribs; i++) {
+    const along = station.along - profile.width / 2 + ((i + 1) / (profile.ribs + 1)) * profile.width;
+    const a0 = along - BINDER_RIB_W / 2;
+    const a1 = along + BINDER_RIB_W / 2;
+    const corner = (alongPos: number, radial: number, z: number): Vec3 =>
+      station.side === "x+" || station.side === "x-"
+        ? [station.wall + sign * radial, alongPos, z]
+        : [alongPos, station.wall + sign * radial, z];
+    out.push({
+      kind: "hull",
+      pts: [
+        corner(a0, 0, zFace),
+        corner(a1, 0, zFace),
+        corner(a0, 0, zApex),
+        corner(a0, profile.protrusion, zFace),
+        corner(a1, profile.protrusion, zFace),
+        corner(a0, profile.protrusion, zApex),
+      ],
+    });
+  }
+  return out;
+}
+
 function placeFlanges(
   outer: Loop,
   outerH: number,
@@ -759,7 +855,7 @@ function placeFlanges(
 ): FlangeBuild {
   const profile = binder ? binderProfile(binder) : clipProfile();
   const none = emptyFlange();
-  const stations = planFlangeStations(outer, avoid, profile.width, profile.protrusion);
+  const stations = planFlangeStations(outer, avoid, profile.width, profile.protrusion, binder);
   if (!stations.length) {
     warnings.push("No cupo ninguna pestaña de cierre junto al borde.");
     return none;
@@ -798,6 +894,7 @@ function placeFlanges(
         const zFace = face === "below" ? range.z0 : range.z1;
         const gusset = binderGusset(station, profile, zFace, face === "below", outerH);
         if (gusset) pack.unions.push(gusset);
+        pack.unions.push(...binderRibs(station, profile, zFace, face === "below", outerH));
         pack.slots.push(binderGroove(station, profile, zFace, face === "below"));
       }
     });
